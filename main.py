@@ -1,5 +1,6 @@
 import os
 import sys
+sys.stdout.reconfigure(encoding='utf-8')
 from datetime import datetime # 【关键】引入时间库
 from dotenv import load_dotenv
 from openai import OpenAI
