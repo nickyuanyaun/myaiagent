@@ -10,6 +10,9 @@ from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from ddgs import DDGS
 
+import json
+import signal
+
 # 1. Load Configuration
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -17,6 +20,8 @@ ALLOWED_USER_IDS = [int(id_str.strip()) for id_str in os.getenv("ALLOWED_USER_ID
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gemini-3-flash-preview")
+MEMORY_FILE = "memory.json"
+MAX_CONTEXT_MESSAGES = 20 # Only send last 20 messages to API to save tokens
 
 # 2. Logging
 logging.basicConfig(
@@ -25,6 +30,23 @@ logging.basicConfig(
 )
 
 # 3. Helper Functions
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {}
+    try:
+        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to load memory: {e}")
+        return {}
+
+def save_memory(memory_data):
+    try:
+        with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(memory_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save memory: {e}")
+
 def get_system_prompt():
     current_date = datetime.now().strftime("%Y-%m-%d")
     current_year = datetime.now().strftime("%Y")
@@ -33,13 +55,14 @@ Current Date: {current_date} (Year: {current_year})
 
 PROTOCOL:
 1. Analyze the user's request.
-2. If the user asks about current events, news, or information that might change (e.g., "latest news", "stock price", "who is the president"), you MUST perform a web search.
+2. If the user asks about **weather**, current events, news, stock prices, or any information that changes with time, you **MUST** perform a web search.
 3. To search, respond ONLY with: SEARCH: <English Keywords>
    - Translate the query to English for better results.
-   - Example: User "iPhone 16 release date", Output: SEARCH: iPhone 16 release date rumors {current_year}
+   - Example: User "Suzhou weather", Output: SEARCH: Suzhou weather forecast
 4. If the user asks a general question or chit-chat, respond directly in Chinese.
-5. You are allowed ONLY ONE search turn. If you receive search results, you must answer the user's question in Chinese based on those results.
-6. If the search results are empty or irrelevant, you must admit you don't know (in Chinese).
+5. **CRITICAL**: Do not make up facts or dates. If you are not sure, SEARCH.
+6. You are allowed ONLY ONE search turn. If you receive search results, you must answer the user's question in Chinese based on those results.
+7. If the search results are empty or irrelevant, you must admit you don't know (in Chinese).
 """
 
 def search_web(query):
@@ -50,6 +73,7 @@ def search_web(query):
         results = DDGS().text(query, region="wt-wt", backend="html", max_results=10)
         
         if not results:
+            logging.warning("DDGS returned empty results.")
             return "No results found."
         
         summary = "Search Results:\n"
@@ -75,44 +99,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    str_user_id = str(user_id)
 
-    # Messages history for this turn
-    messages = [
-        {"role": "system", "content": get_system_prompt()},
-        {"role": "user", "content": user_input}
-    ]
+    # --- Load Memory ---
+    memory = load_memory()
+    if str_user_id not in memory:
+        memory[str_user_id] = []
+    
+    user_history = memory[str_user_id]
+
+    # --- Construct Context for API (Sliding Window) ---
+    # Always include System Prompt
+    messages = [{"role": "system", "content": get_system_prompt()}]
+    
+    # Append recent history (last N messages) + current user input
+    # Note: user_history is a list of stored dicts
+    recent_history = user_history[-MAX_CONTEXT_MESSAGES:] if user_history else []
+    messages.extend(recent_history)
+    messages.append({"role": "user", "content": user_input})
 
     try:
-        # Initialize Async Client per request (or globally, but lightweight enough)
+        # Initialize Async Client per request
         client = AsyncOpenAI(
             api_key=OPENAI_API_KEY,
             base_url=OPENAI_BASE_URL
         )
 
-        # Show typing status
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
         # --- Round 1: Thinking ---
         response = await client.chat.completions.create(
             model=OPENAI_MODEL_NAME,
-            temperature=1.0, # Creative for chat
+            temperature=0.6,
             messages=messages
         )
         ai_message = response.choices[0].message.content.strip()
 
+        # Update temporary conversation list for Round 2 if needed
+        # We don't save Round 1 "SEARCH:" commands to long-term memory to keep it clean,
+        # OR we can save them. Let's ONLY save the final QA pairs to keep memory clean.
+
         # --- Check for Search Command ---
         if ai_message.startswith("SEARCH:"):
             search_query = ai_message.replace("SEARCH:", "").strip()
-            
-            # Notify user searching is happening (optional, but good UX)
-            # await context.bot.send_message(chat_id=chat_id, text=f"🔍 正在搜索: {search_query}...")
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-            # Perform Search (Run in executor to avoid blocking async loop if DDGS blocks)
-            # For simplicity, calling sync function directly; if DDGS blocks too long, might warn.
-            # Ideally: loop = asyncio.get_running_loop(); await loop.run_in_executor(None, search_web, search_query)
-            loop = asyncio.get_running_loop()
-            search_results = await loop.run_in_executor(None, search_web, search_query)
+            # Perform Search
+            search_results = search_web(search_query)
             
             # --- Round 2: Answering with Data ---
             messages.append({"role": "assistant", "content": ai_message})
@@ -120,23 +153,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             response_final = await client.chat.completions.create(
                 model=OPENAI_MODEL_NAME,
-                temperature=0.7, # More focused for grounded answers
+                temperature=0.7,
                 messages=messages
             )
             final_answer = response_final.choices[0].message.content
             
             await context.bot.send_message(chat_id=chat_id, text=final_answer)
+            
+            # --- Save Final Interaction to Memory ---
+            user_history.append({"role": "user", "content": user_input})
+            user_history.append({"role": "assistant", "content": final_answer})
 
         else:
             # Direct answer
             await context.bot.send_message(chat_id=chat_id, text=ai_message)
+            
+            # --- Save Direct Interaction to Memory ---
+            user_history.append({"role": "user", "content": user_input})
+            user_history.append({"role": "assistant", "content": ai_message})
+
+        # --- Persist Memory ---
+        memory[str_user_id] = user_history
+        save_memory(memory)
 
     except Exception as e:
         logging.error(f"Error handling message: {e}")
         await context.bot.send_message(chat_id=chat_id, text="抱歉，处理您的请求时出现错误。")
 
-# 5. Main Entry
+# 5. Signal Handling for Graceful Shutdown
+def signal_handler(signum, frame):
+    print("\nReceived termination signal. Exiting gracefully...")
+    # Add any specific cleanup code here if needed
+    sys.exit(0)
+
+# 6. Main Entry
 if __name__ == '__main__':
+    # Register signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in environment variables.")
         sys.exit(1)
@@ -149,5 +203,5 @@ if __name__ == '__main__':
     application.add_handler(start_handler)
     application.add_handler(message_handler)
     
-    print("Telegram Bot is running...")
+    print("Telegram Bot is running... (Press Ctrl+C to stop)")
     application.run_polling()
