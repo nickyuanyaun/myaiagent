@@ -3,7 +3,7 @@ import sys
 from datetime import datetime # 【关键】引入时间库
 from dotenv import load_dotenv
 from openai import OpenAI
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # 1. 加载配置
 load_dotenv()
@@ -25,7 +25,7 @@ def search_web(query):
     try:
         # region="wt-wt": 全球搜索
         # max_results=10: 多抓几条
-        results = DDGS().text(query, region="wt-wt", max_results=10)
+        results = DDGS().text(query, region="wt-wt", backend="html", max_results=10)
         
         if not results:
             return "搜索引擎返回空结果。"
