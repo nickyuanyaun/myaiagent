@@ -138,8 +138,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Analyze Message with Qwen (for saving/reminders)
     # Run in thread to avoid blocking loop
     analysis = {} # Default empty
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     try:
-        analysis = await asyncio.to_thread(qwen_brain.analyze_message, user_input)
+        # Pass current_time to Qwen so it knows "now"
+        analysis = await asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str)
         logger.info(f"Qwen Analysis: {analysis}")
     except Exception as qwen_err:
         logger.error(f"Qwen Brain Critical Failure: {qwen_err}")
@@ -159,24 +162,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_target = analysis.get('target_user') and analysis.get('target_user') != 'me'
     
     if (is_reminder or has_target) and analysis.get('reminder_content'):
-        # Parse time. For MVP, we'll try to guess simple seconds or just do 60s default if parsing fails
-        # A real agent needs a parser library like dateparser
-        # Here we just look for simple keywords or default.
-        delay = 10 # Default 10s (faster for direct messages)
+        delay = 10 # Default fallback
         content = analysis['reminder_content']
+        time_str = str(analysis.get('reminder_time', '')).strip()
         
-        # Very naive parsing for demo
-        time_str = str(analysis.get('reminder_time', '')).lower()
-        if "minute" in time_str or "分" in time_str:
-             # extract number?
-             # import re (moved to top)
-             nums = re.findall(r'\d+', time_str)
-             if nums:
-                 delay = int(nums[0]) * 60
-        elif "second" in time_str or "秒" in time_str:
-             nums = re.findall(r'\d+', time_str)
-             if nums:
-                 delay = int(nums[0])
+        # 1. Try to parse as Absolute ISO Timestamp (YYYY-MM-DD HH:MM:SS)
+        parsed_delay = None
+        try:
+           # Qwen returns YYYY-MM-DD HH:MM:SS
+           target_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+           now_dt = datetime.now()
+           diff = (target_dt - now_dt).total_seconds()
+           if diff < 5:
+               parsed_delay = 5 # Minimum buffer
+           else:
+               parsed_delay = int(diff)
+           print(f"DEBUG: Parsed absolute time '{time_str}' -> delay {parsed_delay}s")
+        except ValueError:
+           # Not a standard timestamp, fall through to relative parsing
+           pass
+
+        if parsed_delay is not None:
+            delay = parsed_delay
+        else:
+             # 2. Fallback to Naive Relative Parsing (legacy)
+             time_str_lower = time_str.lower()
+             if "minute" in time_str_lower or "分" in time_str_lower:
+                  nums = re.findall(r'\d+', time_str_lower)
+                  if nums:
+                      delay = int(nums[0]) * 60
+             elif "second" in time_str_lower or "秒" in time_str_lower:
+                  nums = re.findall(r'\d+', time_str_lower)
+                  if nums:
+                      delay = int(nums[0])
         
         # --- Cross-User Routing Logic ---
         # Robust retrieval: Handle explicit None from JSON

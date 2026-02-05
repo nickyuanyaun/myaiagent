@@ -13,18 +13,19 @@ class QwenBrain:
         # Use explicit client with 127.0.0.1 to avoid localhost resolution issues on Windows
         self.client = ollama.Client(host='http://127.0.0.1:11434')
 
-    def analyze_message(self, user_text: str):
+    def analyze_message(self, user_text: str, current_time: str = None):
         """
         Ask Qwen to analyze the message for:
         1. Knowledge to save (long-term memory).
         2. Reminders to schedule.
         Returns a dictionary.
         """
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not current_time:
+             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         system_prompt = f"""
         You are the 'Subconscious Mind' of an AI Agent.
-        Current Time: {current_time}
+        Current Reference Time: {current_time}
         
         Your Task: Analyze the User's input and extract structured data.
         
@@ -32,13 +33,16 @@ class QwenBrain:
            - If yes, set 'save_memory' to True and extract the fact into 'extracted_knowledge'.
            - Ignore trivial greetings or questions (e.g., "Hi", "What is the weather?").
         
-        2. **REMINDER**: Does the user ask to be reminded of something?
+        2. **REMINDER/MESSAGE**: does the user ask to remind OR tell someone something?
            - If yes, set 'reminder_needed' to True.
-           - Extract 'reminder_time' (try to convert to ISO or relative time like '1 minute', '60 seconds').
-           - Extract 'reminder_content' (what to remind about).
-           - Extract 'target_user' (who to remind). Values: "me" (default), "dad", "mom", "son", "nick".
+           - **Extract 'reminder_time'**: 
+             - If relative (e.g., "in 10 mins"), keep as is.
+             - If absolute (e.g., "at 5pm", "tomorrow morning"), **CALCULATE the specific YYYY-MM-DD HH:MM:SS timestamp** based on the Reference Time. 
+             - Example: If Ref is 2025-01-01 10:00:00 and user says "at 2pm", output "2025-01-01 14:00:00".
+           - Extract 'reminder_content' (what to remind/say).
+           - Extract 'target_user' (who to remind). Values: "me" (default), "dad", "mom", "son", "nick", "fox".
            - Example 1: "Remind me to drink water" -> target_user="me"
-           - Example 2: "Remind Dad to take pills" -> target_user="dad"
+           - Example 2: "Tell Dad I'm coming home" -> target_user="dad"
         
         Output JSON ONLY. Format:
         {{
