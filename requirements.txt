@@ -1,4 +1,7 @@
 openai
 python-dotenv
 ddgs
-python-telegram-bot
+python-telegram-bot[job-queue]
+APScheduler
+ollama
+chromadb
