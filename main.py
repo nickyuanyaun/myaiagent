@@ -125,7 +125,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 2. Retrieve Memory (Synchronous ChromaDB call, fast enough usually)
-    retrieved_docs = memory_store.search_memory(user_input, n_results=3)
+    retrieved_docs = memory_store.search_memory(user_input, user_id=user_id, n_results=3)
     memory_context = qwen_brain.synthesize_context(retrieved_docs)
     logger.info(f"Memories found: {len(retrieved_docs)}")
 

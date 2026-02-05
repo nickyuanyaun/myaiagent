@@ -54,15 +54,41 @@ class MemoryStore:
         self._save()
         logger.info(f"Saved memory: {text}")
 
-    def search_memory(self, query: str, n_results=5):
+    def search_memory(self, query: str, user_id=None, n_results=5):
         """
-        Naive search: Returns all memories. 
+        Naive search: Returns all memories for a specific user. 
         We rely on QwenBrain to filter them or we implement a simple keyword match here.
         """
         # Simple Keyword Match
         keywords = query.lower().split()
         scored = []
-        for mem in self.memories:
+        
+        # Filter by user_id first
+        relevant_memories = []
+        if user_id:
+             current_uid_str = str(user_id)
+             for mem in self.memories:
+                 # Check if metadata exists and matches
+                 meta = mem.get('metadata', {})
+                 stored_uid = str(meta.get('user_id', 'None'))
+                 
+                 # PARANOID DEBUGGING
+                 # logger.info(f"Compare: Stored '{stored_uid}' vs Req '{current_uid_str}' -> {stored_uid == current_uid_str}")
+                 
+                 if stored_uid == current_uid_str:
+                     relevant_memories.append(mem)
+             
+             logger.info(f"SEARCH DEBUG: User {user_id} | Total Mem: {len(self.memories)} | Match: {len(relevant_memories)}")
+        else:
+             # Fallback if no user_id provided (dev mode), search all
+             relevant_memories = self.memories
+             logger.warning("SEARCH DEBUG: No user_id provided! Searching ALL memories.")
+        
+        # Log the content of matches to ensure no contamination
+        if relevant_memories:
+            logger.info(f"SEARCH MATCHES: {[m['text'][:20] for m in relevant_memories]}")
+
+        for mem in relevant_memories:
             score = 0
             content = mem['text'].lower()
             for kw in keywords:
@@ -76,8 +102,8 @@ class MemoryStore:
         
         # If no keywords match, maybe return most recent?
         if not scored:
-             # Return last 3
-             return [m['text'] for m in self.memories[-3:]]
+             # Return last 3 from RELEVANT filtered memories only
+             return [m['text'] for m in relevant_memories[-3:]]
         
         return [s[1] for s in scored[:n_results]]
 
