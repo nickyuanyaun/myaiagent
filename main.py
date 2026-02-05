@@ -83,16 +83,22 @@ def search_web(query, time_limit=None):
         logger.error(f"Search error: {e}")
         return f"Error during search: {e}"
 
+async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Refactored callback for reminders."""
+    job = context.job
+    try:
+        await context.bot.send_message(chat_id=job.chat_id, text=f"⏰ 提醒: {job.data}")
+        logger.info(f"Reminder sent successfully to {job.chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send reminder to {job.chat_id}: {e}")
+
 async def schedule_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, delay_seconds: int):
     """Schedule a job to send a reminder."""
-    # Define the callback function for the job
-    async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
-        await context.bot.send_message(chat_id=chat_id, text=f"⏰ 提醒: {text}")
-
     # Use the job queue
     try:
         if context.job_queue:
-            context.job_queue.run_once(reminder_job, delay_seconds, chat_id=chat_id)
+            # Pass text as 'data' and chat_id as context (chat_id kwarg sets job.chat_id)
+            context.job_queue.run_once(reminder_callback, delay_seconds, chat_id=chat_id, data=text)
             logger.info(f"Scheduled reminder for chat {chat_id} in {delay_seconds}s: {text}")
         else:
              logger.error("JobQueue not available in context!")
@@ -141,17 +147,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     # Process Analysis result
+    print(f"DEBUG: Full Qwen Analysis: {analysis}")
     if analysis.get('save_memory') and analysis.get('extracted_knowledge'):
         knowledge = analysis['extracted_knowledge']
         # Save to DB
         await asyncio.to_thread(memory_store.add_memory, knowledge, {"source": "user_chat", "user_id": user_id})
         # Optionally notify user? No, keep it subtle.
 
-    if analysis.get('reminder_needed') and analysis.get('reminder_content'):
+    # If reminder is needed OR if there is a specific target user (implying a message/reminder), we proceed.
+    is_reminder = analysis.get('reminder_needed')
+    has_target = analysis.get('target_user') and analysis.get('target_user') != 'me'
+    
+    if (is_reminder or has_target) and analysis.get('reminder_content'):
         # Parse time. For MVP, we'll try to guess simple seconds or just do 60s default if parsing fails
         # A real agent needs a parser library like dateparser
         # Here we just look for simple keywords or default.
-        delay = 60 # Default 1 min
+        delay = 10 # Default 10s (faster for direct messages)
         content = analysis['reminder_content']
         
         # Very naive parsing for demo
@@ -167,10 +178,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              if nums:
                  delay = int(nums[0])
         
-        await schedule_reminder(context, chat_id, content, delay)
-        # Note: We let Gemini confirm the reminder normally, or we can inject it into Gemini's context that we set it.
-        # Let's inject it.
-        memory_context += f"\n[SYSTEM ALERT]: A reminder has been set for {delay} seconds from now about '{content}'."
+        # --- Cross-User Routing Logic ---
+        # Robust retrieval: Handle explicit None from JSON
+        raw_target = analysis.get('target_user')
+        target_role = raw_target if raw_target else 'me'
+        
+        target_chat_id = chat_id # Default to self
+        
+        # FAMILY DIRECTORY (Hardcoded for simplicity based on user request)
+        FAMILY_DIRECTORY = {
+            "dad": 1660122746,
+            "father": 1660122746,
+            "baba": 1660122746,
+            "fox": 1660122746,
+            "mom": 8295191474,
+            "mother": 8295191474,
+            "mama": 8295191474,
+            "son": 8526935699,
+            "nick": 8526935699,
+            "me": chat_id
+        }
+        
+        # Check against directory
+        if target_role.lower() in FAMILY_DIRECTORY:
+            found_id = FAMILY_DIRECTORY[target_role.lower()]
+            target_chat_id = found_id
+        elif target_role.lower() != 'me':
+            # Warn if target extracted but not known
+             await context.bot.send_message(chat_id=chat_id, text=f"⚠ 我听到了您想提醒 '{target_role}'，但我不知道他是谁。\n目前支持: Dad, Mom, Son, Fox (或把我也加上?)。本次提醒将发给您自己。")
+        
+        # Adjust content for recipient
+        final_content = content
+        if target_chat_id != chat_id:
+            sender_name = update.effective_user.first_name if update.effective_user else "家人"
+            # Standard Format as requested
+            final_content = f"{sender_name} 让我告诉你：{content}"
+
+            # Notify sender (pass info to Gemini context for natural confirmation)
+             # ... (Gemini context update is handled below)
+            
+        print(f"DEBUG: Calling schedule_reminder with chat_id={target_chat_id}, delay={delay}")
+        await schedule_reminder(context, target_chat_id, final_content, delay)
+        
+        # Only alert Gemini if it's for self, otherwise Gemini effectively "did" it via tool
+        if target_chat_id == chat_id:
+             memory_context += f"\n[SYSTEM ALERT]: A reminder has been set for {delay} seconds from now about '{content}'."
+        else:
+             action_type = "sent a message" if delay <= 15 else f"scheduled a reminder (in {delay}s)"
+             memory_context += (
+                 f"\n[SYSTEM ALERT]: You have successfully {action_type} to {target_role} ({target_chat_id}).\n"
+                 f"Content: {final_content}\n"
+                 "PLEASE reply to the user confirming this action naturally. Do not just repeat the system alert."
+             )
 
     # --- Phase 2: Gemini Generation ---
     try:

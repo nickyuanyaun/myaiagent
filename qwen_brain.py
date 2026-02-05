@@ -36,7 +36,9 @@ class QwenBrain:
            - If yes, set 'reminder_needed' to True.
            - Extract 'reminder_time' (try to convert to ISO or relative time like '1 minute', '60 seconds').
            - Extract 'reminder_content' (what to remind about).
-           - Example: "Remind me to drink water in 1 minute" -> time="1 minute", content="drink water"
+           - Extract 'target_user' (who to remind). Values: "me" (default), "dad", "mom", "son", "nick".
+           - Example 1: "Remind me to drink water" -> target_user="me"
+           - Example 2: "Remind Dad to take pills" -> target_user="dad"
         
         Output JSON ONLY. Format:
         {{
@@ -44,7 +46,8 @@ class QwenBrain:
             "extracted_knowledge": string or null,
             "reminder_needed": boolean,
             "reminder_time": string or null,
-            "reminder_content": string or null
+            "reminder_content": string or null,
+            "target_user": string or null
         }}
         """
         
@@ -96,7 +99,8 @@ class QwenBrain:
                 "extracted_knowledge": None,
                 "reminder_needed": False,
                 "reminder_time": None,
-                "reminder_content": None
+                "reminder_content": None,
+                "target_user": None
             }
 
     def synthesize_context(self, retrieved_memories):
