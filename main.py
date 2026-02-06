@@ -48,40 +48,50 @@ logger = logging.getLogger(__name__)
 
 def generate_image_native(prompt: str) -> bytes:
     """
-    Generates an image using Google GenAI SDK (Gemini native / Imagen 3).
+    Generates an image using Google GenAI SDK (Nano Banana Pro / gemini-3-pro-image-preview).
     """
-    logger.info(f"Generating Image via Native GenAI for: {prompt}")
+    logger.info(f"Generating Image via Nano Banana Pro for: {prompt}")
     try:
-        # Using imagen-4.0-ultra-generate-001 (The REAL Nano Banana Pro)
-        
-        # CORRECT CONFIG TYPE IS 'GenerateImagesConfig' (PLURAL)
-        response = genai_client.models.generate_images(
-            model='imagen-4.0-ultra-generate-001',
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
+        # Create chat session with Nano Banana Pro
+        chat = genai_client.chats.create(
+            model="gemini-3-pro-image-preview",
+            config=types.GenerateContentConfig(
+                response_modalities=['TEXT', 'IMAGE'],
+                tools=[{"google_search": {}}]
             )
         )
-        if response.generated_images:
-            return response.generated_images[0].image.image_bytes
+        
+        response = chat.send_message(prompt)
+        
+        found_bytes = None
+        
+        if response.parts:
+            for part in response.parts:
+                if part.text:
+                    logger.info(f"Image Gen Text Response: {part.text}")
+                
+                # Try to extract image using as_image() as per snippet
+                try:
+                    # The snippet uses assignment expression := but we can be explicit
+                    img = part.as_image()
+                    if img:
+                        # Save to memory buffer
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        found_bytes = buf.getvalue()
+                        logger.info("Image extracted from response.")
+                        break
+                except Exception as e_parse:
+                    logger.debug(f"Part is not an image or failed to parse: {e_parse}")
+
+        if found_bytes:
+            return found_bytes
         else:
-            raise Exception("No images returned.")
+            raise Exception("No image found in response parts.")
+
     except Exception as e:
-        logger.error(f"Native Image Gen Error: {e}")
-        # Fallback to imagen-4.0-generate-001
-        try:
-             logger.info("Retrying with imagen-4.0-generate-001...")
-             response = genai_client.models.generate_images(
-                model='imagen-4.0-generate-001',
-                prompt=prompt,
-                config=types.GenerateImagesConfig(number_of_images=1)
-             )
-             if response.generated_images:
-                 return response.generated_images[0].image.image_bytes
-        except Exception as e2:
-             logger.error(f"Fallback Image Gen Error: {e2}")
-             # Raise the LAST error so user sees why the fallback failed too
-             raise e2
+        logger.error(f"Nano Banana Pro Error: {e}")
+        raise e
 
 # 3. Global Instances
 # In a robust app these would be in a Context object, but for a script globals are fine.
