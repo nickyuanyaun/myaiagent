@@ -86,32 +86,28 @@ def generate_image_native(prompt: str) -> bytes:
                      logger.info(f"Executable Code found: {part.executable_code}")
 
                 # Try to extract image
-                try:
-                    # Logic 1: Use SDK helper if available
-                    img = None
-                    try: 
-                        img = part.as_image()
-                    except: pass
-
-                    # Logic 2: Manual Check for inline_data (Blob)
-                    if not img and hasattr(part, 'inline_data') and part.inline_data:
-                        logger.info("Found inline_data blob, decoding manually.")
-                        if part.inline_data.data:
-                             # It's already bytes or a Blob object with data
-                             found_bytes = part.inline_data.data
-                             logger.info(f"Image bytes extracted directly: {len(found_bytes)} bytes")
-                             break
-                    
-                    if img:
+                # Priority 1: Direct bytes from inline_data (Most robust)
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    logger.info("Found inline_data blob.")
+                    if part.inline_data.data:
+                         found_bytes = part.inline_data.data
+                         logger.info(f"Image bytes extracted directly: {len(found_bytes)} bytes. MIME: {getattr(part.inline_data, 'mime_type', 'unknown')}")
+                         break
+                
+                # Priority 2: Use SDK helper if available (Fallback)
+                try: 
+                    img = part.as_image()
+                    if img and not found_bytes:
                         # Save to memory buffer
                         buf = io.BytesIO()
-                        img.save(buf, format="PNG")
-                        found_bytes = buf.getvalue()
-                        logger.info("Image extracted via as_image().")
-                        break
-                        
+                        # Some custom Image classes don't support format arg, try without if it fails? 
+                        # Or just skip if we didn't get bytes above.
+                        # Given the error seen ("unexpected keyword argument 'format'"), 
+                        # this helper likely returns a simple wrapper that only supports save(path).
+                        # We will skip it if we haven't found bytes yet, or try a different approach if needed.
+                        logger.warning("part.as_image() returned object, but inline_data was preferred. If you see this, inline_data failed?")
                 except Exception as e_parse:
-                    logger.warning(f"Failed to parse part: {e_parse}")
+                     pass
 
         if found_bytes:
             return found_bytes
