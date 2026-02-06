@@ -87,16 +87,31 @@ def generate_image_native(prompt: str) -> bytes:
 
                 # Try to extract image
                 try:
-                    img = part.as_image()
+                    # Logic 1: Use SDK helper if available
+                    img = None
+                    try: 
+                        img = part.as_image()
+                    except: pass
+
+                    # Logic 2: Manual Check for inline_data (Blob)
+                    if not img and hasattr(part, 'inline_data') and part.inline_data:
+                        logger.info("Found inline_data blob, decoding manually.")
+                        if part.inline_data.data:
+                             # It's already bytes or a Blob object with data
+                             found_bytes = part.inline_data.data
+                             logger.info(f"Image bytes extracted directly: {len(found_bytes)} bytes")
+                             break
+                    
                     if img:
+                        # Save to memory buffer
                         buf = io.BytesIO()
                         img.save(buf, format="PNG")
                         found_bytes = buf.getvalue()
-                        logger.info("Image extracted from response.")
+                        logger.info("Image extracted via as_image().")
                         break
+                        
                 except Exception as e_parse:
-                    # Not an image part
-                    pass
+                    logger.warning(f"Failed to parse part: {e_parse}")
 
         if found_bytes:
             return found_bytes
