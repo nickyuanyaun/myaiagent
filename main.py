@@ -7,6 +7,10 @@ import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+# New Google GenAI SDK
+from google import genai
+from google.genai import types
+
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -25,8 +29,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_IDS = [int(id_str.strip()) for id_str in os.getenv("ALLOWED_USER_IDS", "").split(",") if id_str.strip()]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gemini-2.0-flash-exp") # Updated default
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gemini-2.0-flash-exp") 
 MAX_CONTEXT_MESSAGES = 20
+
+# Initialize Google GenAI Client (for Built-in Image Gen)
+# Uses the same key as OpenAI-compatible endpoint usually, or needs GOOGLE_API_KEY.
+# For Gemini API, they are often the same if using AI Studio.
+genai_client = genai.Client(api_key=OPENAI_API_KEY, http_options={'api_version': 'v1beta'})
 
 # 2. Logging
 logging.basicConfig(
@@ -34,6 +43,45 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ... (omitted parts) ...
+
+def generate_image_native(prompt: str) -> bytes:
+    """
+    Generates an image using Google GenAI SDK (Gemini native / Imagen 3).
+    """
+    logger.info(f"Generating Image via Native GenAI for: {prompt}")
+    try:
+        # Using imagen-4.0-ultra-generate-001 (The REAL Nano Banana Pro)
+        
+        # CORRECT CONFIG TYPE IS 'GenerateImagesConfig' (PLURAL)
+        response = genai_client.models.generate_images(
+            model='imagen-4.0-ultra-generate-001',
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+            )
+        )
+        if response.generated_images:
+            return response.generated_images[0].image.image_bytes
+        else:
+            raise Exception("No images returned.")
+    except Exception as e:
+        logger.error(f"Native Image Gen Error: {e}")
+        # Fallback to imagen-4.0-generate-001
+        try:
+             logger.info("Retrying with imagen-4.0-generate-001...")
+             response = genai_client.models.generate_images(
+                model='imagen-4.0-generate-001',
+                prompt=prompt,
+                config=types.GenerateImagesConfig(number_of_images=1)
+             )
+             if response.generated_images:
+                 return response.generated_images[0].image.image_bytes
+        except Exception as e2:
+             logger.error(f"Fallback Image Gen Error: {e2}")
+             # Raise the LAST error so user sees why the fallback failed too
+             raise e2
 
 # 3. Global Instances
 # In a robust app these would be in a Context object, but for a script globals are fine.
@@ -52,21 +100,33 @@ def get_system_prompt(memories=""):
     return f"""You are a helpful and friendly AI assistant. 
 Current Date: {current_date} (Year: {current_year})
 {memory_section}
+
 PROTOCOL:
 1. **SYSTEM ALERTS**: If the input starts with or contains `[SYSTEM ALERT]`, it means a background process has ALREADY taken action. You MUST acknowledge it. 
    - Example: "[SYSTEM ALERT]: Reminder set" -> You say: "Okay, I've set that reminder."
+
 2. Analyze the user's request.
-2. **SEARCH**: If the user asks about weather, news, stocks, or real-time info:
+
+3. **SEARCH**: If the user asks about weather, news, stocks, or real-time info:
    - For general queries, respond with: SEARCH: <English Keywords>
    - For **Breaking News / Price / Today's** info, respond with: SEARCH_NEWS: <English Keywords>
-3. If searching, translate the query to English.
-4. If general chat, respond in Chinese.
-5. If the retrieved memory is relevant, use it to personalize the answer.
-6. **Reminders**: Your 'Subconscious Mind' (Qwen) handles reminders automatically. 
+
+4. **IMAGE GENERATION (Nano Banana Pro)**:
+   - If the user asks to draw / generate an image, respond with: `DRAW: <Detailed English Prompt>`
+   - **CRITICAL**: Do NOT return JSON, XML, or Code. ONLY return the plain string starting with `DRAW:`.
+   - Example: User "画一只猫" -> You: `DRAW: A cute cat sitting on a windowsill, cinematic lighting`
+
+5. If general chat, respond in Chinese.
+6. If the retrieved memory is relevant, use it to personalize the answer.
+
+7. **Reminders**: Your 'Subconscious Mind' (Qwen) handles reminders automatically. 
    - If you see a [SYSTEM ALERT] about a reminder being set, CONFIRM it to the user. 
    - If the user asks for a reminder, assume your Subconscious Mind handles it, and just say "好的，我会提醒你" (Okay, I will remind you). DO NOT say you cannot do it.
-7. Do not make up facts.
+
+8. Do not make up facts. Do not output internal thought processes or JSON unless explicitly asked for code.
 """
+
+
 
 def search_web(query, time_limit=None):
     logger.info(f"Searching web for: {query} (Limit: {time_limit})")
@@ -172,9 +232,16 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if qwen_brain:
+        logger.info("Starting Qwen Analysis (Timeout: 30s)...")
         try:
-            analysis = await asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str)
+            # Run with timeout to prevent blocking the bot if Ollama hangs
+            analysis = await asyncio.wait_for(
+                asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str),
+                timeout=30.0
+            )
             logger.info(f"Qwen Analysis: {analysis}")
+        except asyncio.TimeoutError:
+            logger.error("❌ Qwen Analysis Timed Out (Ollama too slow or stuck). Skipping.")
         except Exception as qwen_err:
             logger.error(f"Qwen Error: {qwen_err}")
 
@@ -193,6 +260,9 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
         content = analysis['reminder_content']
         time_str = str(analysis.get('reminder_time', '')).strip()
         
+        # Debug feedback
+        logger.info(f"Reminder detected: {content} at {time_str}")
+        
         # Absolute Time Parsing
         parsed_delay = None
         try:
@@ -204,12 +274,12 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
         if parsed_delay is not None:
             delay = parsed_delay
         else:
-             # Relative Fallback
+             # Relative Fallback (Enhanced)
              time_str_lower = time_str.lower()
-             if "minute" in time_str_lower or "分" in time_str_lower:
+             if "minute" in time_str_lower or "min" in time_str_lower or "分" in time_str_lower:
                   nums = re.findall(r'\d+', time_str_lower)
                   if nums: delay = int(nums[0]) * 60
-             elif "second" in time_str_lower or "秒" in time_str_lower:
+             elif "second" in time_str_lower or "sec" in time_str_lower or "秒" in time_str_lower:
                   nums = re.findall(r'\d+', time_str_lower)
                   if nums: delay = int(nums[0])
         
@@ -225,7 +295,10 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
         }
         
         if target_role.lower() in FAMILY_DIRECTORY:
-            target_chat_id = FAMILY_DIRECTORY[target_role.lower()]
+            chat_target = FAMILY_DIRECTORY[target_role.lower()]
+            # Only switch if not 'me'
+            if target_role.lower() != 'me':
+                target_chat_id = chat_target
         elif target_role.lower() != 'me':
              await context.bot.send_message(chat_id=chat_id, text=f"⚠ 未知目标 '{target_role}'。将发给您自己。")
         
@@ -236,6 +309,9 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
             
         await schedule_reminder(context, target_chat_id, final_content, delay)
         
+        # Explicit confirmation for debugging
+        await context.bot.send_message(chat_id=chat_id, text=f"🧠 Qwen 已设定提醒: {delay}秒后 - {content}")
+
         if target_chat_id == chat_id:
              memory_context += f"\n[SYSTEM ALERT]: A reminder has been set for {delay} seconds from now about '{content}'."
         else:
@@ -266,7 +342,34 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
         )
         ai_message = response.choices[0].message.content.strip()
 
-        # Handle SEARCH
+        # --- Self-Correction Logic for "Agentic" JSON Output ---
+        # Sometimes the model hallucinates a JSON tool format. We catch it here.
+        draw_prompt = None
+        if ai_message.strip().startswith('{') and "action" in ai_message:
+            try:
+                # Try to parse the hallucinated JSON
+                data = json.loads(ai_message)
+                if data.get("action") in ["dalle.text2im", "generate_image", "draw"]:
+                    # Extract prompt from action_input
+                    action_input = data.get("action_input")
+                    if isinstance(action_input, str):
+                        try:
+                            # Sometimes action_input is a nested JSON string
+                            input_data = json.loads(action_input)
+                            draw_prompt = input_data.get("prompt")
+                        except:
+                            # Or just a string
+                            draw_prompt = action_input
+                    elif isinstance(action_input, dict):
+                        draw_prompt = action_input.get("prompt")
+                    
+                    if draw_prompt:
+                        logger.info(f"Intercepted JSON Tool Call. Extracted prompt: {draw_prompt}")
+                        ai_message = f"DRAW: {draw_prompt}" # Rewrite message to trigger standard logic
+            except Exception as e:
+                logger.warning(f"Failed to parse JSON output: {e}")
+
+        # Handle SEARCH and DRAW
         if ai_message.startswith("SEARCH:") or ai_message.startswith("SEARCH_NEWS:"):
             is_news = ai_message.startswith("SEARCH_NEWS:")
             query = ai_message.replace("SEARCH_NEWS:" if is_news else "SEARCH:", "").strip()
@@ -282,6 +385,27 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
             await context.bot.send_message(chat_id=chat_id, text=final_answer)
             context.user_data['history'].append({"role": "user", "content": user_input})
             context.user_data['history'].append({"role": "assistant", "content": final_answer})
+
+        elif ai_message.startswith("DRAW:"):
+             # Handle Image Generation
+             prompt = ai_message.replace("DRAW:", "").strip()
+             await context.bot.send_message(chat_id=chat_id, text=f"🎨 正在调用 Nano Banana Pro 为您生成: {prompt} ...")
+             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+             
+             try:
+                 # Run in thread to not block
+                 img_bytes = await asyncio.to_thread(generate_image_native, prompt)
+                 await context.bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=f"✨ Generated by Nano Banana Pro\nPrompt: {prompt}")
+                 
+                 # Add system confirmation to history so bot knows it succeeded
+                 context.user_data['history'].append({"role": "user", "content": user_input})
+                 context.user_data['history'].append({"role": "assistant", "content": ai_message}) # Keep the DRAW intent
+                 context.user_data['history'].append({"role": "system", "content": "[SYSTEM]: Image successfully generated and sent."})
+
+             except Exception as img_err:
+                 logger.error(f"Image Gen Failed: {img_err}")
+                 await context.bot.send_message(chat_id=chat_id, text=f"❌ 生图失败: {img_err}")
+
         else:
             await context.bot.send_message(chat_id=chat_id, text=ai_message)
             context.user_data['history'].append({"role": "user", "content": user_input})
@@ -318,6 +442,8 @@ if __name__ == '__main__':
         
         print("Agent is running with Explicit Vision Handlers! (Ctrl+C to stop)")
         application.run_polling()
+    except KeyboardInterrupt:
+        print("\nBot stopped by user. Goodbye!")
     except Exception as e:
         logger.fatal(f"Critical Error in Main Loop: {e}", exc_info=True)
         print(f"CRITICAL ERROR: {e}")
