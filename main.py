@@ -267,12 +267,12 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if qwen_brain:
-        logger.info("Starting Qwen Analysis (Timeout: 30s)...")
+        logger.info("Starting DeepSeek Analysis (Timeout: 60s)...")
         try:
             # Run with timeout to prevent blocking the bot if Ollama hangs
             analysis = await asyncio.wait_for(
                 asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str),
-                timeout=30.0
+                timeout=60.0
             )
             logger.info(f"Qwen Analysis: {analysis}")
         except asyncio.TimeoutError:

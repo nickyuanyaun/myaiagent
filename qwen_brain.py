@@ -8,17 +8,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QwenBrain:
-    def __init__(self, model_name="qwen2.5:14b"):
+    def __init__(self, model_name="deepseek-r1:14b"):
         self.model_name = model_name
         # Use explicit client with 127.0.0.1 to avoid localhost resolution issues on Windows
         self.client = ollama.Client(host='http://127.0.0.1:11434')
 
     def analyze_message(self, user_text: str, current_time: str = None):
         """
-        Ask Qwen to analyze the message for:
-        1. Knowledge to save (long-term memory).
-        2. Reminders to schedule.
-        Returns a dictionary.
+        Ask Qwen (now DeepSeek-R1) to analyze the message.
         """
         if not current_time:
              current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -44,7 +41,13 @@ class QwenBrain:
            - Example 1: "Remind me to drink water" -> target_user="me"
            - Example 2: "Tell Dad I'm coming home" -> target_user="dad"
         
-        Output JSON ONLY. Format:
+        **CRITICAL INSTRUCTION**: 
+        - Please think deeply before answering.
+        - After thinking, output ONLY formatted JSON. 
+        - Do NOT include markdown code blocks (```json). 
+        - Do NOT output any text other than the JSON object.
+        
+        Output JSON Format:
         {{
             "save_memory": boolean,
             "extracted_knowledge": string or null,
@@ -68,6 +71,11 @@ class QwenBrain:
 
             content = response['message']['content']
             
+            # --- DeepSeek-R1 Specific Cleanup ---
+            # Remove <think>...</think> blocks
+            import re
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+            
             # Sanitize content: remove markdown code blocks if present
             content = content.strip()
             if content.startswith("```json"):
@@ -78,7 +86,7 @@ class QwenBrain:
                 content = content[:-3]
             content = content.strip()
             
-            logger.info(f"Raw Qwen Output: {content}") # Debug log
+            logger.info(f"Raw DeepSeek Output (Cleaned): {content}") # Debug log
             
             try:
                 parsed = json.loads(content)
