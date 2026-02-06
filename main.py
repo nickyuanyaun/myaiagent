@@ -63,6 +63,17 @@ def generate_image_native(prompt: str) -> bytes:
         
         response = chat.send_message(prompt)
         
+        # DEBUG: Log the full response details
+        logger.info(f"Raw Response: {response}")
+        try:
+             # Attempt to inspect candidates if available (structure varies by SDK version)
+             if hasattr(response, 'candidates'):
+                  for i, cand in enumerate(response.candidates):
+                       logger.info(f"Candidate {i} Finish Reason: {cand.finish_reason}")
+                       logger.info(f"Candidate {i} Content: {cand.content}")
+        except Exception as e_debug:
+             logger.warning(f"Failed to inspect candidates: {e_debug}")
+
         found_bytes = None
         
         if response.parts:
@@ -70,24 +81,27 @@ def generate_image_native(prompt: str) -> bytes:
                 if part.text:
                     logger.info(f"Image Gen Text Response: {part.text}")
                 
-                # Try to extract image using as_image() as per snippet
+                # Check for executable code (sometimes it returns code to generate image?)
+                if hasattr(part, 'executable_code') and part.executable_code:
+                     logger.info(f"Executable Code found: {part.executable_code}")
+
+                # Try to extract image
                 try:
-                    # The snippet uses assignment expression := but we can be explicit
                     img = part.as_image()
                     if img:
-                        # Save to memory buffer
                         buf = io.BytesIO()
                         img.save(buf, format="PNG")
                         found_bytes = buf.getvalue()
                         logger.info("Image extracted from response.")
                         break
                 except Exception as e_parse:
-                    logger.debug(f"Part is not an image or failed to parse: {e_parse}")
+                    # Not an image part
+                    pass
 
         if found_bytes:
             return found_bytes
         else:
-            raise Exception("No image found in response parts.")
+            raise Exception("No image found in response parts. Check logs for details.")
 
     except Exception as e:
         logger.error(f"Nano Banana Pro Error: {e}")
