@@ -127,7 +127,7 @@ def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = 
     """
     Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
     """
-    full_prompt = prompt
+    full_prompt = f"Edit this image to match the following description. Maintain the original composition and subject where possible: {prompt}"
     if negative_prompt:
         full_prompt += f"\nNegative Prompt: {negative_prompt}"
         
