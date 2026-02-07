@@ -535,7 +535,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         response = await client.chat.completions.create(
             model=OPENAI_MODEL_NAME, temperature=0.6, messages=messages
         )
-        ai_message = response.choices[0].message.content.strip()
+        msg_content = response.choices[0].message.content
+        if not msg_content:
+             logger.warning(f"Empty content from model. Finish reason: {response.choices[0].finish_reason}")
+             await context.bot.send_message(chat_id=chat_id, text="⚠️ 模型未返回内容（可能触发了安全过滤）。请换个说法试试。")
+             return
+
+        ai_message = msg_content.strip()
 
         # --- Self-Correction Logic for "Agentic" JSON Output ---
         # Sometimes the model hallucinates a JSON tool format. We catch it here.
