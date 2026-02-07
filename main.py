@@ -544,23 +544,34 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             try:
                 # Try to parse the hallucinated JSON
                 data = json.loads(ai_message)
-                if data.get("action") in ["dalle.text2im", "generate_image", "draw"]:
+                if data.get("action") in ["dalle.text2im", "generate_image", "draw", "edit", "draw_advanced", "edit_advanced"]:
                     # Extract prompt from action_input
                     action_input = data.get("action_input")
+                    draw_prompt = None
+                    negative_prompt = None
+                    
                     if isinstance(action_input, str):
                         try:
                             # Sometimes action_input is a nested JSON string
                             input_data = json.loads(action_input)
                             draw_prompt = input_data.get("prompt")
+                            negative_prompt = input_data.get("negative_prompt")
                         except:
                             # Or just a string
                             draw_prompt = action_input
                     elif isinstance(action_input, dict):
                         draw_prompt = action_input.get("prompt")
+                        negative_prompt = action_input.get("negative_prompt")
                     
                     if draw_prompt:
                         logger.info(f"Intercepted JSON Tool Call. Extracted prompt: {draw_prompt}")
-                        ai_message = f"DRAW: {draw_prompt}" # Rewrite message to trigger standard logic
+                        # Determine action type
+                        is_edit = "edit" in data.get("action").lower()
+                        prefix = "EDIT_ADVANCED" if is_edit else "DRAW_ADVANCED"
+                        
+                        ai_message = f"{prefix}: {draw_prompt}"
+                        if negative_prompt:
+                            ai_message += f" ||| NEGATIVE: {negative_prompt}"
             except Exception as e:
                 logger.warning(f"Failed to parse JSON output: {e}")
 
