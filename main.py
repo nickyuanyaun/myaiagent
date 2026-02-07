@@ -47,11 +47,15 @@ logger = logging.getLogger(__name__)
 
 # ... (omitted parts) ...
 
-def generate_image_native(prompt: str) -> bytes:
+def generate_image_native(prompt: str, negative_prompt: str = None) -> bytes:
     """
     Generates an image using Google GenAI SDK (Nano Banana Pro / gemini-3-pro-image-preview).
     """
-    logger.info(f"Generating Image via Nano Banana Pro for: {prompt}")
+    full_prompt = prompt
+    if negative_prompt:
+        full_prompt += f"\nNegative Prompt: {negative_prompt}"
+        
+    logger.info(f"Generating Image via Nano Banana Pro for: {full_prompt}")
     try:
         # Create chat session with Nano Banana Pro
         chat = genai_client.chats.create(
@@ -62,7 +66,7 @@ def generate_image_native(prompt: str) -> bytes:
             )
         )
         
-        response = chat.send_message(prompt)
+        response = chat.send_message(full_prompt)
         
         # DEBUG: Log the full response details
         logger.info(f"Raw Response: {response}")
