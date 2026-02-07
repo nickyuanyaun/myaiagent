@@ -273,6 +273,9 @@ async def schedule_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="你好！我是你的增强型 AI 助手。\n我拥有 Gemini 的智慧和 Qwen 的记忆。")
 
+# Global Lock for Serializing Requests (Queue)
+processing_lock = asyncio.Lock()
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for Text messages."""
     user = update.effective_user
@@ -286,7 +289,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_input: return
     
     logger.info(f"TEXT Received from {user.first_name}: {user_input}")
-    await process_agent_logic(context, chat_id, user_input, image_b64=None, update=update)
+    
+    # Acquire Lock (Enter Queue)
+    if processing_lock.locked():
+        await context.bot.send_message(chat_id=chat_id, text="⏳ 前一名用户正在处理中，请稍候（排队中）...")
+    
+    async with processing_lock:
+        await process_agent_logic(context, chat_id, user_input, image_b64=None, update=update)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for Photo messages."""
@@ -314,7 +323,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
         logger.info("Image downloaded, cached, and encoded.")
         
-        await process_agent_logic(context, chat_id, caption, image_b64=image_b64, update=update)
+        # Acquire Lock (Enter Queue)
+        if processing_lock.locked():
+             await context.bot.send_message(chat_id=chat_id, text="⏳ 前一名用户正在处理中，请稍候...")
+
+        async with processing_lock:
+            await process_agent_logic(context, chat_id, caption, image_b64=image_b64, update=update)
+            
     except Exception as e:
         logger.error(f"Photo processing error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"图片处理失败: {e}")
