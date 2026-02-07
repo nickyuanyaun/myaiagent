@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 # New Google GenAI SDK
 from google import genai
 from google.genai import types
+from PIL import Image
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -118,6 +119,64 @@ def generate_image_native(prompt: str) -> bytes:
         logger.error(f"Nano Banana Pro Error: {e}")
         raise e
 
+def generate_image_edit(prompt: str, image_bytes: bytes) -> bytes:
+    """
+    Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
+    """
+    logger.info(f"Editing Image via Nano Banana Pro with prompt: {prompt}")
+    try:
+        from PIL import Image
+        
+        # Load the input image
+        input_img = Image.open(io.BytesIO(image_bytes))
+        
+        # Create chat session
+        chat = genai_client.chats.create(
+            model="gemini-3-pro-image-preview",
+            config=types.GenerateContentConfig(
+                response_modalities=['TEXT', 'IMAGE'],
+                tools=[{"google_search": {}}]
+            )
+        )
+        
+        # Send Prompt + Image
+        # Note: 'google.genai' SDK usually accepts PIL Image objects directly in the message list
+        response = chat.send_message([prompt, input_img])
+        
+        # Extract Result (Reuse same logic as native gen)
+        found_bytes = None
+        if response.parts:
+            for part in response.parts:
+                if part.text:
+                    logger.info(f"Edit Text Response: {part.text}")
+                
+                # Priority 1: Inline Data
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    if part.inline_data.data:
+                         found_bytes = part.inline_data.data
+                         break
+                
+                # Priority 2: as_image()
+                try: 
+                    img = part.as_image()
+                    if img and not found_bytes:
+                        buf = io.BytesIO()
+                        # Try to save as PNG (Edit might return different format?)
+                        try: img.save(buf, format="PNG")
+                        except: img.save(buf) # Fallback
+                        found_bytes = buf.getvalue()
+                        break
+                except: pass
+
+        if found_bytes:
+            return found_bytes
+        else:
+            raise Exception("No edited image found in response.")
+
+    except Exception as e:
+        logger.error(f"Nano Banana Pro Edit Error: {e}")
+        raise e
+
 # 3. Global Instances
 # In a robust app these would be in a Context object, but for a script globals are fine.
 memory_store = None
@@ -146,10 +205,16 @@ PROTOCOL:
    - For general queries, respond with: SEARCH: <English Keywords>
    - For **Breaking News / Price / Today's** info, respond with: SEARCH_NEWS: <English Keywords>
 
-4. **IMAGE GENERATION (Nano Banana Pro)**:
-   - If the user asks to draw / generate an image, respond with: `DRAW: <Detailed English Prompt>`
-   - **CRITICAL**: Do NOT return JSON, XML, or Code. ONLY return the plain string starting with `DRAW:`.
-   - Example: User "画一只猫" -> You: `DRAW: A cute cat sitting on a windowsill, cinematic lighting`
+   - For **Breaking News / Price / Today's** info, respond with: SEARCH_NEWS: <English Keywords>
+   
+4. **IMAGE GENERATION / EDITING (Nano Banana Pro)**:
+   - If user asks to DRAW/GENERATE an image:
+     - Respond: `DRAW: <Detailed English Prompt>`
+   - If user asks to EDIT/MODIFY the LAST uploaded image:
+     - Respond: `EDIT: <Detailed English Prompt>`
+   - **CRITICAL**: Do NOT return JSON. ONLY return the plain string starting with `DRAW:` or `EDIT:`.
+   - Example 1: "画一只猫" -> `DRAW: A cute cat sitting on a windowsill`
+   - Example 2: "把刚才的图改成赛博朋克风格" -> `EDIT: Make the scene cyberpunk style, neon lights`
 
 5. If general chat, respond in Chinese.
 6. If the retrieved memory is relevant, use it to personalize the answer.
@@ -241,8 +306,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await update.message.photo[-1].get_file()
         img_buffer = io.BytesIO()
         await photo_file.download_to_memory(img_buffer)
-        image_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
-        logger.info("Image downloaded and encoded.")
+        
+        # Save cache for editing
+        image_bytes = img_buffer.getvalue()
+        context.user_data['last_image_bytes'] = image_bytes
+        
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        logger.info("Image downloaded, cached, and encoded.")
         
         await process_agent_logic(context, chat_id, caption, image_b64=image_b64, update=update)
     except Exception as e:
@@ -421,25 +491,42 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
             context.user_data['history'].append({"role": "user", "content": user_input})
             context.user_data['history'].append({"role": "assistant", "content": final_answer})
 
-        elif ai_message.startswith("DRAW:"):
-             # Handle Image Generation
-             prompt = ai_message.replace("DRAW:", "").strip()
-             await context.bot.send_message(chat_id=chat_id, text=f"🎨 正在调用 Nano Banana Pro 为您生成: {prompt} ...")
+        if ai_message.startswith("DRAW:") or ai_message.startswith("EDIT:"):
+             is_edit = ai_message.startswith("EDIT:")
+             action_name = "EDIT" if is_edit else "DRAW"
+             
+             # Handle Image Generation / Editing
+             prompt = ai_message.replace(f"{action_name}:", "").strip()
+             
+             # Check for cached image if Editing
+             input_image_bytes = None
+             if is_edit:
+                 input_image_bytes = context.user_data.get('last_image_bytes')
+                 if not input_image_bytes:
+                     await context.bot.send_message(chat_id=chat_id, text="⚠️ 无法编辑：我没有找到您最近上传的图片。请先发一张图给我！")
+                     return
+
+             await context.bot.send_message(chat_id=chat_id, text=f"🎨 正在调用 Nano Banana Pro 为您{'修改' if is_edit else '生成'}: {prompt} ...")
              await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
              
              try:
                  # Run in thread to not block
-                 img_bytes = await asyncio.to_thread(generate_image_native, prompt)
-                 await context.bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=f"✨ Generated by Nano Banana Pro\nPrompt: {prompt}")
+                 if is_edit:
+                     # For edit, we pass the image bytes
+                     img_bytes = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes)
+                 else:
+                     img_bytes = await asyncio.to_thread(generate_image_native, prompt)
+                 
+                 await context.bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=f"✨ Generated by Nano Banana Pro ({action_name})\nPrompt: {prompt}")
                  
                  # Add system confirmation to history so bot knows it succeeded
                  context.user_data['history'].append({"role": "user", "content": user_input})
-                 context.user_data['history'].append({"role": "assistant", "content": ai_message}) # Keep the DRAW intent
-                 context.user_data['history'].append({"role": "system", "content": "[SYSTEM]: Image successfully generated and sent."})
+                 context.user_data['history'].append({"role": "assistant", "content": ai_message}) 
+                 context.user_data['history'].append({"role": "system", "content": f"[SYSTEM]: Image successfully {action_name.lower()}ed and sent."})
 
              except Exception as img_err:
-                 logger.error(f"Image Gen Failed: {img_err}")
-                 await context.bot.send_message(chat_id=chat_id, text=f"❌ 生图失败: {img_err}")
+                 logger.error(f"Image {action_name} Failed: {img_err}")
+                 await context.bot.send_message(chat_id=chat_id, text=f"❌ {action_name}失败: {img_err}")
 
         else:
             await context.bot.send_message(chat_id=chat_id, text=ai_message)
