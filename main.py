@@ -276,6 +276,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Global Lock for Serializing Requests (Queue)
 processing_lock = asyncio.Lock()
 
+# Media Group Buffer
+# Structure: { media_group_id: { 'images': [b64_1, b64_2], 'caption': "...", 'timer': <asyncio.Task> } }
+media_group_cache = {}
+
+async def process_media_group(context, chat_id, media_group_id, update):
+    """
+    Callback to process the buffered media group after debounce timer.
+    """
+    if media_group_id not in media_group_cache: return
+    
+    data = media_group_cache.pop(media_group_id)
+    images = data['images']
+    caption = data['caption']
+    
+    logger.info(f"Processing Media Group {media_group_id} with {len(images)} images.")
+    await context.bot.send_message(chat_id=chat_id, text=f"📸 收到 {len(images)} 张图片，正在整合分析...")
+
+    # Acquire Lock (Enter Queue)
+    if processing_lock.locked():
+        await context.bot.send_message(chat_id=chat_id, text="⏳ 前一名用户正在处理中，请稍候（排队中）...")
+    
+    async with processing_lock:
+        # Pass list of images to logic
+        await process_agent_logic(context, chat_id, caption, image_b64=None, update=update, additional_images=images)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for Text messages."""
     user = update.effective_user
@@ -307,21 +333,52 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     caption = update.message.caption if update.message.caption else "Please analyze this image."
-    logger.info(f"PHOTO Received from {user.first_name}. Caption: {caption}")
+    # If part of media group, update.message.caption might be None on some parts, find strict check later or just use last non-empty.
     
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+    logger.info(f"PHOTO Received from {user.first_name}. GroupID: {update.message.media_group_id} Caption: {caption}")
     
     try:
         photo_file = await update.message.photo[-1].get_file()
         img_buffer = io.BytesIO()
         await photo_file.download_to_memory(img_buffer)
         
-        # Save cache for editing
+        # Save cache for editing (Always save last single image for quick edit)
         image_bytes = img_buffer.getvalue()
         context.user_data['last_image_bytes'] = image_bytes
         
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
         logger.info("Image downloaded, cached, and encoded.")
+        
+        # --- Media Group Logic ---
+        mg_id = update.message.media_group_id
+        if mg_id:
+            if mg_id not in media_group_cache:
+                media_group_cache[mg_id] = {
+                    'images': [],
+                    'caption': caption,
+                    'timer': None
+                }
+            
+            # Add image
+            media_group_cache[mg_id]['images'].append(image_b64)
+            
+            # Update caption if current one is better (e.g. not default)
+            if caption and caption != "Please analyze this image.":
+                media_group_cache[mg_id]['caption'] = caption
+            
+            # Debounce Timer
+            if media_group_cache[mg_id]['timer']:
+                media_group_cache[mg_id]['timer'].cancel()
+            
+            async def trigger():
+                await asyncio.sleep(2.0) # Wait 2 seconds for other photos
+                await process_media_group(context, chat_id, mg_id, update)
+                
+            media_group_cache[mg_id]['timer'] = asyncio.create_task(trigger())
+            return # Stop here, let timer trigger processing
+        
+        # --- Single Photo Logic (Legacy) ---
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         
         # Acquire Lock (Enter Queue)
         if processing_lock.locked():
@@ -334,8 +391,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Photo processing error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"图片处理失败: {e}")
 
-async def process_agent_logic(context, chat_id, user_input, image_b64, update):
+async def process_agent_logic(context, chat_id, user_input, image_b64, update, additional_images=None):
     """Shared Logic"""
+    if additional_images is None: additional_images = []
+    
     # --- Phase 1: Qwen Analysis (Parallel / Background) ---
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
@@ -447,11 +506,15 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update):
         for msg in context.user_data['history'][-10:]: messages.append(msg)
             
         # Add Current User Message
-        if image_b64:
-            payload = [
-                {"type": "text", "text": user_input},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-            ]
+        # Combine single image_b64 and additional_images into one list
+        all_images = []
+        if image_b64: all_images.append(image_b64)
+        if additional_images: all_images.extend(additional_images)
+        
+        if all_images:
+            payload = [{"type": "text", "text": user_input}]
+            for b64 in all_images:
+                payload.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             messages.append({"role": "user", "content": payload})
         else:
             messages.append({"role": "user", "content": user_input})
