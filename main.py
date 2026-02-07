@@ -119,11 +119,15 @@ def generate_image_native(prompt: str) -> bytes:
         logger.error(f"Nano Banana Pro Error: {e}")
         raise e
 
-def generate_image_edit(prompt: str, image_bytes: bytes) -> bytes:
+def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = None) -> bytes:
     """
     Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
     """
-    logger.info(f"Editing Image via Nano Banana Pro with prompt: {prompt}")
+    full_prompt = prompt
+    if negative_prompt:
+        full_prompt += f"\nNegative Prompt: {negative_prompt}"
+        
+    logger.info(f"Editing Image via Nano Banana Pro with prompt: {full_prompt}")
     try:
         from PIL import Image
         
@@ -141,7 +145,7 @@ def generate_image_edit(prompt: str, image_bytes: bytes) -> bytes:
         
         # Send Prompt + Image
         # Note: 'google.genai' SDK usually accepts PIL Image objects directly in the message list
-        response = chat.send_message([prompt, input_img])
+        response = chat.send_message([full_prompt, input_img])
         
         # Extract Result (Reuse same logic as native gen)
         found_bytes = None
@@ -161,7 +165,6 @@ def generate_image_edit(prompt: str, image_bytes: bytes) -> bytes:
                     img = part.as_image()
                     if img and not found_bytes:
                         buf = io.BytesIO()
-                        # Try to save as PNG (Edit might return different format?)
                         try: img.save(buf, format="PNG")
                         except: img.save(buf) # Fallback
                         found_bytes = buf.getvalue()
@@ -207,14 +210,19 @@ PROTOCOL:
 
    - For **Breaking News / Price / Today's** info, respond with: SEARCH_NEWS: <English Keywords>
    
+   - For **Breaking News / Price / Today's** info, respond with: SEARCH_NEWS: <English Keywords>
+   
 4. **IMAGE GENERATION / EDITING (Nano Banana Pro)**:
    - If user asks to DRAW/GENERATE an image:
-     - Respond: `DRAW: <Detailed English Prompt>`
+     - Respond: `DRAW_ADVANCED: <High Quality Positive Prompt> ||| NEGATIVE: <Negative Prompt>`
    - If user asks to EDIT/MODIFY the LAST uploaded image:
-     - Respond: `EDIT: <Detailed English Prompt>`
-   - **CRITICAL**: Do NOT return JSON. ONLY return the plain string starting with `DRAW:` or `EDIT:`.
-   - Example 1: "画一只猫" -> `DRAW: A cute cat sitting on a windowsill`
-   - Example 2: "把刚才的图改成赛博朋克风格" -> `EDIT: Make the scene cyberpunk style, neon lights`
+     - Respond: `EDIT_ADVANCED: <High Quality Positive Prompt> ||| NEGATIVE: <Negative Prompt>`
+   - **CRITICAL**: 
+     - Expand the prompt to be detailed (lighting, style, resolution).
+     - Include a NEGATIVE prompt (e.g. low quality, blurry, mutated).
+     - ONLY return the plain string starting with `DRAW_ADVANCED:` or `EDIT_ADVANCED:`.
+   - Example 1: `DRAW_ADVANCED: a cute cat, cinematic lighting, 8k, photorealistic ||| NEGATIVE: blurry, bad anatomy, low res`
+   - Example 2: `EDIT_ADVANCED: make it cyberpunk style, neon lights, high contrast ||| NEGATIVE: black and white, dull`
 
 5. If general chat, respond in Chinese.
 6. If the retrieved memory is relevant, use it to personalize the answer.
@@ -569,12 +577,23 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             context.user_data['history'].append({"role": "user", "content": user_input})
             context.user_data['history'].append({"role": "assistant", "content": final_answer})
 
-        if ai_message.startswith("DRAW:") or ai_message.startswith("EDIT:"):
-             is_edit = ai_message.startswith("EDIT:")
+        elif ai_message.startswith("DRAW:") or ai_message.startswith("EDIT:") or ai_message.startswith("DRAW_ADVANCED:") or ai_message.startswith("EDIT_ADVANCED:"):
+             is_advanced = "ADVANCED" in ai_message
+             is_edit = "EDIT" in ai_message
              action_name = "EDIT" if is_edit else "DRAW"
              
              # Handle Image Generation / Editing
-             prompt = ai_message.replace(f"{action_name}:", "").strip()
+             raw_content = ai_message.replace(f"{action_name}{'_ADVANCED' if is_advanced else ''}:", "").strip()
+             
+             # Parse Advanced Prompts
+             prompt = raw_content
+             negative_prompt = None
+             
+             if "||| NEGATIVE:" in raw_content:
+                 parts = raw_content.split("||| NEGATIVE:")
+                 prompt = parts[0].strip()
+                 if len(parts) > 1:
+                     negative_prompt = parts[1].strip()
              
              # Check for cached image if Editing
              input_image_bytes = None
@@ -584,18 +603,26 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                      await context.bot.send_message(chat_id=chat_id, text="⚠️ 无法编辑：我没有找到您最近上传的图片。请先发一张图给我！")
                      return
 
-             await context.bot.send_message(chat_id=chat_id, text=f"🎨 正在调用 Nano Banana Pro 为您{'修改' if is_edit else '生成'}: {prompt} ...")
+             status_text = f"🎨 正在调用 Nano Banana Pro 为您{'修改' if is_edit else '生成'}..."
+             if is_advanced:
+                 status_text += f"\nPrompt: {prompt[:50]}..."
+             
+             await context.bot.send_message(chat_id=chat_id, text=status_text)
              await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
              
              try:
                  # Run in thread to not block
                  if is_edit:
                      # For edit, we pass the image bytes
-                     img_bytes = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes)
+                     img_bytes = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes, negative_prompt)
                  else:
-                     img_bytes = await asyncio.to_thread(generate_image_native, prompt)
+                     img_bytes = await asyncio.to_thread(generate_image_native, prompt, negative_prompt)
                  
-                 await context.bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=f"✨ Generated by Nano Banana Pro ({action_name})\nPrompt: {prompt}")
+                 caption_text = f"✨ Generated by Nano Banana Pro ({action_name})\nPrompt: {prompt[:100]}..."
+                 if negative_prompt:
+                     caption_text += f"\nNegative: {negative_prompt[:50]}..."
+                     
+                 await context.bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=caption_text)
                  
                  # Add system confirmation to history so bot knows it succeeded
                  context.user_data['history'].append({"role": "user", "content": user_input})
