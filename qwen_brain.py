@@ -33,13 +33,18 @@ class QwenBrain:
         2. **REMINDER/MESSAGE**: does the user ask to remind OR tell someone something?
            - If yes, set 'reminder_needed' to True.
            - **Extract 'reminder_time'**: 
-             - If relative (e.g., "in 10 mins"), keep as is.
-             - If absolute (e.g., "at 5pm", "tomorrow morning"), **CALCULATE the specific YYYY-MM-DD HH:MM:SS timestamp** based on the Reference Time. 
-             - Example: If Ref is 2025-01-01 10:00:00 and user says "at 2pm", output "2025-01-01 14:00:00".
+             - **ALWAYS convert to text YYYY-MM-DD HH:MM:SS timestamp**.
+             - If user says "in 10 mins", calculate Current Time + 10 mins.
+             - If user says "tomorrow morning", set to tomorrow 09:00:00.
+             - If user says "at 5pm", set to today 17:00:00 (or tomorrow if 5pm passed).
            - Extract 'reminder_content' (what to remind/say).
            - Extract 'target_user' (who to remind). Values: "me" (default), "dad", "mom", "son", "nick", "fox".
-           - Example 1: "Remind me to drink water" -> target_user="me"
-           - Example 2: "Tell Dad I'm coming home" -> target_user="dad"
+
+        3. **DOWNLOAD**: Does the user ask to download a video or provide a video link with intent to save?
+           - If yes, set 'download_needed' to True.
+           - Extract 'download_url'.
+           - Example 1: "Download this video: https://youtube.com/..." -> download_needed=True, download_url="https://youtube.com/..."
+           - Example 2: "https://bilibili.com/video/..." (just a link) -> Check context, if ambiguous set download_needed=True (better safe than sorry).
         
         **CRITICAL INSTRUCTION**: 
         - Please think deeply before answering.
@@ -54,7 +59,9 @@ class QwenBrain:
             "reminder_needed": boolean,
             "reminder_time": string or null,
             "reminder_content": string or null,
-            "target_user": string or null
+            "target_user": string or null,
+            "download_needed": boolean,
+            "download_url": string or null
         }}
         """
         
@@ -112,7 +119,9 @@ class QwenBrain:
                 "reminder_needed": False,
                 "reminder_time": None,
                 "reminder_content": None,
-                "target_user": None
+                "target_user": None,
+                "download_needed": False,
+                "download_url": None
             }
 
     def synthesize_context(self, retrieved_memories):

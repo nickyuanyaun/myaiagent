@@ -23,6 +23,10 @@ import re
 # Import our new brains
 from memory_store import MemoryStore
 from qwen_brain import QwenBrain
+from qwen_brain import QwenBrain
+from task_store import TaskStore
+from metube_client import MeTubeClient
+from file_watcher import FileWatcher
 
 # 1. Load Configuration
 load_dotenv()
@@ -188,6 +192,9 @@ def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = 
 # In a robust app these would be in a Context object, but for a script globals are fine.
 memory_store = None
 qwen_brain = None
+task_store = None
+metube_client = None
+file_watcher = None
 
 # 4. Helper Functions
 def get_system_prompt(memories=""):
@@ -266,20 +273,64 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send reminder to {job.chat_id}: {e}")
 
+
+async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Periodic task to check for pending reminders in the TaskStore.
+    """
+    if not task_store: return
+    
+    pending = task_store.get_pending_tasks()
+    now = datetime.now()
+    
+    for task in pending:
+        try:
+            target_dt = datetime.strptime(task['target_timestamp'], "%Y-%m-%d %H:%M:%S")
+            # If time has passed (or is very close, e.g. within 5 seconds)
+            if now >= target_dt:
+                # Send the reminder
+                chat_id = task['chat_id']
+                content = f"⏰ 提醒 (来自过去): {task['content']}"
+                
+                # If target is not 'me', clarify who it's for/from logic if needed, 
+                # but for now let's keep it simple or reuse the stored content.
+                # In process_agent_logic we arguably already formatted the content? 
+                # Let's check. Yes, we formatted it.
+                
+                await context.bot.send_message(chat_id=chat_id, text=content)
+                logger.info(f"Executed task: {task['id']}")
+                
+                # Mark complete
+                task_store.complete_task(task['id'])
+                
+        except Exception as e:
+            logger.error(f"Error checking task {task['id']}: {e}")
+
 async def schedule_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, delay_seconds: int):
-    """Schedule a job to send a reminder."""
-    # Use the job queue
-    try:
-        if context.job_queue:
-            # Pass text as 'data' and chat_id as context (chat_id kwarg sets job.chat_id)
-            context.job_queue.run_once(reminder_callback, delay_seconds, chat_id=chat_id, data=text)
-            logger.info(f"Scheduled reminder for chat {chat_id} in {delay_seconds}s: {text}")
-        else:
-             logger.error("JobQueue not available in context!")
-             await context.bot.send_message(chat_id=chat_id, text="⚠ 系统错误：定时任务队列未初始化，无法设置提醒。")
-    except Exception as e:
-        logger.error(f"Failed to schedule reminder: {e}")
-        await context.bot.send_message(chat_id=chat_id, text="⚠ 系统错误：设置提醒失败。")
+    """
+    DEPRECATED: Use TaskStore instead. 
+    Kept for backward compatibility or immediate feedback if needed.
+    """
+    # We will now route this to TaskStore for persistence if delay > 10s?
+    # actually, let's strictly use TaskStore for everything to ensure persistence even for short timers if crashe happens.
+    # But for very short timers (< 10s), the periodic checker (every 10s) might miss it being "exact".
+    # So:
+    # 1. Calculate Target Time
+    target_dt = datetime.now() + timedelta(seconds=delay_seconds)
+    target_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 2. Add to Store
+    if task_store:
+        task_store.add_task(text, target_str, chat_id)
+        
+    # 3. If delay is short (< 15s), ALSO schedule an in-memory job to ensure promptness?
+    # OR just run the checker more often? 
+    # Let's trust the checker for now, or maybe do both but handle deduplication?
+    # Deduplication is hard. Let's start with just TaskStore.
+    # To make it responsive, we can trigger a check immediately?
+    # For now, let's just log it.
+    logger.info(f"Task scheduled via TaskStore: {text} at {target_str}")
+
 
 # 5. Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,6 +493,21 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         if memory_store:
             await asyncio.to_thread(memory_store.add_memory, knowledge, {"source": "user_chat", "user_id": update.effective_user.id})
 
+    # Download Logic
+    download_status_msg = ""
+    if analysis.get('download_needed') and analysis.get('download_url') and metube_client:
+        url = analysis['download_url']
+        logger.info(f"Download detected: {url}")
+        await context.bot.send_message(chat_id=chat_id, text=f"📥 正在添加到 MeTube 下载队列: {url}")
+        
+        success = await asyncio.to_thread(metube_client.add_download, url)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text="✅ 已成功添加下载任务！")
+            download_status_msg = f"[SYSTEM] Successfully added '{url}' to MeTube download queue."
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="❌ 添加下载失败，请检查 MeTube 服务状态。")
+            download_status_msg = f"[SYSTEM] Failed to add '{url}' to MeTube. Error: Timeout or Internal Server Error."
+
     # Reminder Logic
     is_reminder = analysis.get('reminder_needed')
     has_target = analysis.get('target_user') and analysis.get('target_user') != 'me'
@@ -530,6 +596,10 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             messages.append({"role": "user", "content": payload})
         else:
             messages.append({"role": "user", "content": user_input})
+            
+        # Inject System Status if available (Short-term context for this turn only)
+        if download_status_msg:
+             messages.append({"role": "system", "content": download_status_msg})
         
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         response = await client.chat.completions.create(
@@ -538,6 +608,9 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         msg_content = response.choices[0].message.content
         if not msg_content:
              logger.warning(f"Empty content from model. Finish reason: {response.choices[0].finish_reason}")
+             # If we performed an action (like download), an empty response is acceptable/expected.
+             if download_status_msg:
+                 return
              await context.bot.send_message(chat_id=chat_id, text="⚠️ 模型未返回内容（可能触发了安全过滤）。请换个说法试试。")
              return
 
@@ -674,14 +747,52 @@ if __name__ == '__main__':
         print("Initializing Memory Store...")
         memory_store = MemoryStore()
         print("Initializing Qwen Brain...")
+        print("Initializing Qwen Brain...")
         qwen_brain = QwenBrain() # Assumes Ollama is running
+        print("Initializing Task Store...")
+        task_store = TaskStore()
+        print("Initializing MeTube Client...")
+        metube_client = MeTubeClient()
+        print("Initializing File Watcher...")
+        # SMB Path provided by user
+        smb_path = r"\\192.168.1.28\LaCie\Projects\metube\downloads"
+        file_watcher = FileWatcher(watch_dir=smb_path)
     except Exception as e:
         print(f"Failed to init components: {e}")
         sys.exit(1)
 
+    # Define post_init to start FileWatcher
+    async def post_init(app):
+        # Determine target chat
+        target_chat_id = ALLOWED_USER_IDS[0] if ALLOWED_USER_IDS else None
+        
+        async def file_callback(filepath):
+            filename = os.path.basename(filepath)
+            if target_chat_id:
+                try:
+                    await app.bot.send_message(chat_id=target_chat_id, text=f"🎥 下载完成: {filename}\n正在发送...")
+                    # Send as document
+                    with open(filepath, 'rb') as f:
+                        await app.bot.send_document(chat_id=target_chat_id, document=f, filename=filename)
+                except Exception as e:
+                    logger.error(f"Failed to send file {filename}: {e}")
+                    await app.bot.send_message(chat_id=target_chat_id, text=f"❌ 发送文件失败: {filename}\n{e}")
+
+        if file_watcher:
+            asyncio.create_task(file_watcher.start(file_callback))
+            print("File Watcher Background Task Started.")
+        
+        # Start Periodic Task Checker
+        if app.job_queue:
+             app.job_queue.run_repeating(check_tasks, interval=10, first=1)
+             print("Periodic Task Checker started.")
+
     # Build App
     try:
-        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+        builder.post_init(post_init)
+        application = builder.build()
+        
         application.add_handler(CommandHandler('start', start))
         
         # Explicit Handlers
