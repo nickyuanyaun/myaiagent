@@ -133,6 +133,59 @@ class QwenBrain:
         
         return "\n".join([f"- {m}" for m in retrieved_memories])
 
+    def filter_memories(self, user_text: str, candidate_memories: list) -> list:
+        """
+        Ask Qwen to select which memories are relevant to the user's text.
+        Returns a subset of candidate_memories.
+        """
+        if not candidate_memories:
+            return []
+            
+        candidates_str = "\n".join([f"{i}. {m}" for i, m in enumerate(candidate_memories)])
+        
+        system_prompt = f"""
+        You are a relevance filter. 
+        User Message: "{user_text}"
+        
+        Candidate Memories:
+        {candidates_str}
+        
+        Task: Identify which of the above memories are DIRECTLY useful for answering the user's message.
+        - If a memory provides context for "it", "that", "he/she" in the user message, select it.
+        - If a memory answers a question asked by the user, select it.
+        - If the user is just saying hello or general chat, select NOTHING (return empty list).
+        - If the memory is irrelevant to the current topic, do NOT select it.
+        
+        Output ONLY a JSON list of indices (integers) of the relevant memories. Example: [0, 2]. 
+        If none are relevant, output [].
+        """
+        
+        try:
+             response = self.client.chat(model=self.model_name, messages=[
+                {'role': 'system', 'content': system_prompt}
+            ], format='json')
+             
+             content = response['message']['content']
+             # Cleanup
+             import re
+             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+             if content.startswith("```json"): content = content[7:]
+             if content.endswith("```"): content = content[:-3]
+             
+             indices = json.loads(content.strip())
+             
+             if isinstance(indices, list):
+                 selected = []
+                 for i in indices:
+                     if isinstance(i, int) and 0 <= i < len(candidate_memories):
+                         selected.append(candidate_memories[i])
+                 return selected
+             return []
+             
+        except Exception as e:
+            logger.error(f"Memory filtering failed: {e}")
+            return candidate_memories # Fallback to all if filter fails
+
 if __name__ == "__main__":
     brain = QwenBrain()
     print(brain.analyze_message("My birthday is on January 1st."))

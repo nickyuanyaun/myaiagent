@@ -13,7 +13,28 @@ class FileWatcher:
         self.check_interval = check_interval
         self._ensure_dir()
         self.processed_files = self._load_processed()
+        
+        # Snapshot existing files to avoid re-processing old ones on startup
+        self._snapshot_existing()
+        
         self.running = False
+
+    def _snapshot_existing(self):
+        if not os.path.exists(self.watch_dir):
+            return
+        try:
+            current_files = set(os.listdir(self.watch_dir))
+            # update processed_files with current files (names only)
+            # We don't save this update to disk immediately? 
+            # If we don't save, next restart will re-process them if we crashed before saving.
+            # Best to save and treat them as processed.
+            initial_count = len(self.processed_files)
+            self.processed_files.update(current_files)
+            if len(self.processed_files) > initial_count:
+                logger.info(f"Added {len(self.processed_files) - initial_count} existing files to ignored list.")
+                self._save_processed()
+        except OSError as e:
+            logger.error(f"Failed to snapshot existing files: {e}")
 
     def _ensure_dir(self):
         directory = os.path.dirname(self.processed_file)

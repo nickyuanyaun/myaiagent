@@ -59,8 +59,16 @@ class MemoryStore:
         Naive search: Returns all memories for a specific user. 
         We rely on QwenBrain to filter them or we implement a simple keyword match here.
         """
-        # Simple Keyword Match
-        keywords = query.lower().split()
+        # Simple Keyword Match (Enhanced for Chinese)
+        is_chinese = False
+        if len(query) > 0 and ' ' not in query:
+             # Heuristic: if no spaces, likely CJK or single word.
+             # Check for CJK range (optional but simple check is okay)
+             for char in query:
+                 if '\u4e00' <= char <= '\u9fff':
+                     is_chinese = True
+                     break
+        
         scored = []
         
         # Filter by user_id first
@@ -91,9 +99,21 @@ class MemoryStore:
         for mem in relevant_memories:
             score = 0
             content = mem['text'].lower()
-            for kw in keywords:
-                if kw in content:
-                    score += 1
+            
+            if is_chinese:
+                # Char-level overlap for Chinese
+                q_chars = set(query)
+                c_chars = set(content)
+                overlap = len(q_chars.intersection(c_chars))
+                if overlap > 0:
+                    score = overlap
+            else:
+                # Standard keyword match for space-delimited langs
+                keywords = query.lower().split()
+                for kw in keywords:
+                    if kw in content:
+                        score += 1
+            
             if score > 0:
                 scored.append((score, mem['text']))
         

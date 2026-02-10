@@ -68,3 +68,26 @@ class TaskStore:
     def delete_task(self, task_id):
         self.tasks = [t for t in self.tasks if t["id"] != task_id]
         self._save()
+
+    # --- Download Queue Methods ---
+    def add_download_request(self, chat_id: int):
+        task = {
+            "id": str(uuid.uuid4()),
+            "type": "download_req",
+            "chat_id": chat_id,
+            "status": "pending",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.tasks.append(task)
+        self._save()
+        logger.info(f"Added download request for chat_id: {chat_id}")
+        return task
+
+    def get_next_download_request(self):
+        """
+        Returns the oldest pending download request (FIFO).
+        """
+        pending = [t for t in self.tasks if t.get("type") == "download_req" and t["status"] == "pending"]
+        # Sort by created_at just in case
+        pending.sort(key=lambda x: x["created_at"])
+        return pending[0] if pending else None

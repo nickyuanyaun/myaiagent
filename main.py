@@ -200,14 +200,9 @@ file_watcher = None
 def get_system_prompt(memories=""):
     current_date = datetime.now().strftime("%Y-%m-%d")
     current_year = datetime.now().strftime("%Y")
-    
-    memory_section = ""
-    if memories:
-        memory_section = f"\n\n[RETRIEVED MEMORY/KNOWLEDGE]\nUse this information if relevant:\n{memories}\n"
 
     return f"""You are a helpful and friendly AI assistant. 
 Current Date: {current_date} (Year: {current_year})
-{memory_section}
 
 PROTOCOL:
 1. **SYSTEM ALERTS**: If the input starts with or contains `[SYSTEM ALERT]`, it means a background process has ALREADY taken action. You MUST acknowledge it. 
@@ -243,6 +238,12 @@ PROTOCOL:
    - If the user asks for a reminder, assume your Subconscious Mind handles it, and just say "好的，我会提醒你" (Okay, I will remind you). DO NOT say you cannot do it.
 
 8. Do not make up facts. Do not output internal thought processes or JSON unless explicitly asked for code.
+
+[IMPORTANT - RETRIEVED CONTEXT]
+The following information was retrieved from your long-term memory. 
+You should use this information to personalize your response, BUT ONLY IF it is directly relevant to the user's current topic. 
+If it is irrelevant context (e.g. user asks "how are you" and memory says "user likes apples"), IGNORE IT.
+{memories}
 """
 
 
@@ -462,9 +463,22 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 2. Retrieve Memory
+    # 2. Retrieve Memory
     retrieved_docs = []
     if memory_store:
-        retrieved_docs = memory_store.search_memory(user_input, user_id=update.effective_user.id, n_results=3)
+        # Retrieve more candidates for filtering (e.g. 10)
+        candidates = memory_store.search_memory(user_input, user_id=update.effective_user.id, n_results=10)
+        if qwen_brain and candidates:
+            # Filter matches using Qwen
+            try:
+                retrieved_docs = await asyncio.to_thread(qwen_brain.filter_memories, user_input, candidates)
+                logger.info(f"Memory Filter: {len(candidates)} -> {len(retrieved_docs)}")
+            except Exception as e:
+                logger.error(f"Filter failed, using top 3: {e}")
+                retrieved_docs = candidates[:3]
+        else:
+            retrieved_docs = candidates[:3]
+
     memory_context = ""
     if qwen_brain:
         memory_context = qwen_brain.synthesize_context(retrieved_docs)
@@ -502,8 +516,11 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         
         success = await asyncio.to_thread(metube_client.add_download, url)
         if success:
-            await context.bot.send_message(chat_id=chat_id, text="✅ 已成功添加下载任务！")
+            await context.bot.send_message(chat_id=chat_id, text="✅ 已成功添加下载任务！等待下载完成后发送...")
             download_status_msg = f"[SYSTEM] Successfully added '{url}' to MeTube download queue."
+            # Add to queue (Persistent)
+            if task_store:
+                task_store.add_download_request(chat_id)
         else:
             await context.bot.send_message(chat_id=chat_id, text="❌ 添加下载失败，请检查 MeTube 服务状态。")
             download_status_msg = f"[SYSTEM] Failed to add '{url}' to MeTube. Error: Timeout or Internal Server Error."
@@ -763,17 +780,36 @@ if __name__ == '__main__':
 
     # Define post_init to start FileWatcher
     async def post_init(app):
-        # Determine target chat
-        target_chat_id = ALLOWED_USER_IDS[0] if ALLOWED_USER_IDS else None
         
         async def file_callback(filepath):
             filename = os.path.basename(filepath)
+            
+            # Determine target chat
+            target_chat_id = None
+            pending_task = None
+            
+            if task_store:
+                pending_task = task_store.get_next_download_request()
+            
+            if pending_task:
+                target_chat_id = pending_task["chat_id"]
+                logger.info(f"Matched file {filename} to pending request from {target_chat_id}")
+            else:
+                 # Fallback: Send to first allowed user if queue is empty (unexpected file or restart)
+                 target_chat_id = ALLOWED_USER_IDS[0] if ALLOWED_USER_IDS else None
+                 logger.info(f"No pending download request. Defaulting to {target_chat_id} for {filename}")
+
             if target_chat_id:
                 try:
                     await app.bot.send_message(chat_id=target_chat_id, text=f"🎥 下载完成: {filename}\n正在发送...")
                     # Send as document
                     with open(filepath, 'rb') as f:
                         await app.bot.send_document(chat_id=target_chat_id, document=f, filename=filename)
+                    
+                    # Mark task as complete ONLY after successful send
+                    if pending_task and task_store:
+                        task_store.complete_task(pending_task["id"])
+                        
                 except Exception as e:
                     logger.error(f"Failed to send file {filename}: {e}")
                     await app.bot.send_message(chat_id=target_chat_id, text=f"❌ 发送文件失败: {filename}\n{e}")
