@@ -812,7 +812,12 @@ if __name__ == '__main__':
                         
                 except Exception as e:
                     logger.error(f"Failed to send file {filename}: {e}")
-                    await app.bot.send_message(chat_id=target_chat_id, text=f"❌ 发送文件失败: {filename}\n{e}")
+                    await app.bot.send_message(chat_id=target_chat_id, text=f"❌ 发送文件失败: {filename}\n{e}\n(任务已从队列中移除)")
+                    
+                    # IMPORTANT: Mark task as failed/completed so it doesn't block the queue!
+                    if pending_task and task_store:
+                        # We mark as 'completed' (or could add 'failed' status) to remove it from 'pending' list
+                        task_store.complete_task(pending_task["id"])
 
         if file_watcher:
             asyncio.create_task(file_watcher.start(file_callback))

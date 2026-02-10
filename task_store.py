@@ -91,3 +91,26 @@ class TaskStore:
         # Sort by created_at just in case
         pending.sort(key=lambda x: x["created_at"])
         return pending[0] if pending else None
+
+    def cleanup_stale_tasks(self, hours=2):
+        """
+        Mark tasks as failed if they have been pending for too long.
+        """
+        now = datetime.now()
+        count = 0
+        for task in self.tasks:
+            if task["status"] == "pending":
+                try:
+                    created_at = datetime.strptime(task["created_at"], "%Y-%m-%d %H:%M:%S")
+                    diff = (now - created_at).total_seconds()
+                    if diff > hours * 3600:
+                        task["status"] = "failed"
+                        logger.warning(f"Task {task['id']} marked as failed due to timeout.")
+                        count += 1
+                except ValueError: 
+                    pass # Ignore parse errors
+        
+        if count > 0:
+            self._save()
+            return count
+        return 0
