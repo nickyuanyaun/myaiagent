@@ -15,7 +15,7 @@ class QwenBrain:
 
     def analyze_message(self, user_text: str, current_time: str = None):
         """
-        Ask Qwen (now DeepSeek-R1) to analyze the message.
+        Ask Qwen (now DeepSeek-R1) to analyze the message and return a LIST of tasks.
         """
         if not current_time:
              current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -24,45 +24,75 @@ class QwenBrain:
         You are the 'Subconscious Mind' of an AI Agent.
         Current Reference Time: {current_time}
         
-        Your Task: Analyze the User's input and extract structured data.
+        Your Task: Analyze the User's input and break it down into a list of executable tasks.
+         Output JSON Format:
+        {{
+            "tasks": [
+                {{
+                    "type": "memory_save",
+                    "content": "User likes blue"
+                }},
+                {{
+                    "type": "web_search",
+                    "query": "Bitcoin price",
+                    "is_news": true
+                }},
+                {{
+                     "type": "image_generation",
+                     "prompt": "A cyberpunk cat",
+                     "negative_prompt": "blurry, low quality",
+                     "count": 1,
+                     "action": "draw" 
+                }},
+                {{
+                    "type": "wordpress_post",
+                    "topic": "The future of AI Agents",
+                    "instructions": "Write a professional article...",
+                    "image_prompt": "A futuristic robot working on a laptop",
+                    "username": "User_Provided_Name",
+                    "password": "User_Provided_Password"
+                }},
+                {{
+                    "type": "reminder",
+                    "content": "Check wallet",
+                    "target_time": "YYYY-MM-DD HH:MM:SS",
+                    "target_user": "me"
+                }},
+                {{
+                    "type": "download",
+                    "url": "https://youtube.com/..."
+                }}
+            ]
+        }}
         
-        1. **MEMORY**: Does the user mention a fact about themselves, a preference, or a piece of specific info that should be remembered?
-           - If yes, set 'save_memory' to True and extract the fact into 'extracted_knowledge'.
-           - Ignore trivial greetings or questions (e.g., "Hi", "What is the weather?").
-        
-        2. **REMINDER/MESSAGE**: does the user ask to remind OR tell someone something?
-           - If yes, set 'reminder_needed' to True.
-           - **Extract 'reminder_time'**: 
-             - **ALWAYS convert to text YYYY-MM-DD HH:MM:SS timestamp**.
-             - If user says "in 10 mins", calculate Current Time + 10 mins.
-             - If user says "tomorrow morning", set to tomorrow 09:00:00.
-             - If user says "at 5pm", set to today 17:00:00 (or tomorrow if 5pm passed).
-           - Extract 'reminder_content' (what to remind/say).
-           - Extract 'target_user' (who to remind). Values: "me" (default), "dad", "mom", "son", "nick", "fox".
-
-        3. **DOWNLOAD**: Does the user ask to download a video or provide a video link with intent to save?
-           - If yes, set 'download_needed' to True.
-           - Extract 'download_url'.
-           - Example 1: "Download this video: https://youtube.com/..." -> download_needed=True, download_url="https://youtube.com/..."
-           - Example 2: "https://bilibili.com/video/..." (just a link) -> Check context, if ambiguous set download_needed=True (better safe than sorry).
+        Supported Task Types & Rules:
+        1. "memory_save": Use when user explicitly asks to remember something.
+           - Extract facts about the user or preferences.
+           - Ignore trivial greetings.
+           
+        2. "web_search": Use when user asks for information not in your knowledge or current events. 
+           - If user asks for real-time info, news, weather, stock prices.
+           - Set 'is_news': true for breaking news/prices.
+           
+        3. "image_generation": Use when user asks to generate/draw/create an image.
+           - If user asks to DRAW or EDIT an image.
+           - 'action': "draw" or "edit".
+           - 'count': Number of images to generate (default 1). If user says "3 images", set count to 3.
+           - 'prompt': Detailed positive prompt.
+           - 'negative_prompt': Optional.
+           
+        4. **reminder**:
+           - Schedule a reminder or message.
+           - 'target_time': MUST be absolute YYYY-MM-DD HH:MM:SS. Calculate from "in 10 mins" etc.
+           - 'target_user': "me", "dad", "mom", "son", etc. default "me".
+           
+        5. **download**:
+           - If user provides a video URL to save/download.
         
         **CRITICAL INSTRUCTION**: 
-        - Please think deeply before answering.
-        - After thinking, output ONLY formatted JSON. 
-        - Do NOT include markdown code blocks (```json). 
-        - Do NOT output any text other than the JSON object.
-        
-        Output JSON Format:
-        {{
-            "save_memory": boolean,
-            "extracted_knowledge": string or null,
-            "reminder_needed": boolean,
-            "reminder_time": string or null,
-            "reminder_content": string or null,
-            "target_user": string or null,
-            "download_needed": boolean,
-            "download_url": string or null
-        }}
+        - Return ONLY valid JSON.
+        - Sort tasks logically (e.g. search before reminding).
+        - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """
         
         try:
@@ -108,21 +138,30 @@ class QwenBrain:
                     logger.error("Failed to parse JSON even after cleanup.")
                     raise
             
+            # Ensure "tasks" key exists
+            if "tasks" not in parsed:
+                # Check if it returned a flat structure (legacy fallback)
+                tasks = []
+                if parsed.get("save_memory"):
+                    tasks.append({"type": "memory_save", "content": parsed.get("extracted_knowledge")})
+                if parsed.get("reminder_needed"):
+                    tasks.append({
+                        "type": "reminder", 
+                        "content": parsed.get("reminder_content"),
+                        "target_time": parsed.get("reminder_time"),
+                        "target_user": parsed.get("target_user")
+                    })
+                if parsed.get("download_needed"):
+                    tasks.append({"type": "download", "url": parsed.get("download_url")})
+                
+                parsed["tasks"] = tasks
+
             return parsed
             
         except Exception as e:
             logger.error(f"Qwen analysis failed: {e}")
-            # If ollama lib is missing or fails, we return defaults
-            return {
-                "save_memory": False,
-                "extracted_knowledge": None,
-                "reminder_needed": False,
-                "reminder_time": None,
-                "reminder_content": None,
-                "target_user": None,
-                "download_needed": False,
-                "download_url": None
-            }
+            # Return empty task list on failure
+            return {"tasks": []}
 
     def synthesize_context(self, retrieved_memories):
         """
