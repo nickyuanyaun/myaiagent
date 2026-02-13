@@ -20,6 +20,7 @@ import json
 import signal
 import re
 import uuid
+import requests
 
 # Import our new brains
 from memory_store import MemoryStore
@@ -114,9 +115,13 @@ def generate_image_native(prompt: str, negative_prompt: str = None, count: int =
 
         except Exception as e:
             error_msg = str(e)
-            if ("503" in error_msg or "UNAVAILABLE" in error_msg) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Gemini 503 | Retry {attempt+1}/{max_retries} in {delay}s... Error: {error_msg}")
+            # Handle 503 (Service Unavailable) or 429 (Too Many Requests)
+            is_retryable = "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg
+            
+            if is_retryable and attempt < max_retries - 1:
+                # Exponential backoff: 4s, 8s, 16s...
+                delay = base_delay * (2 ** (attempt + 1))
+                logger.warning(f"Gemini API Error (Retryable) | Retry {attempt+1}/{max_retries} in {delay}s... Error: {error_msg}")
                 time.sleep(delay)
                 continue
             
@@ -706,11 +711,81 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                 try:
                     topic = task_payload.get("topic", "AI Update")
                     instructions = task_payload.get("instructions", "")
+                    image_count = task_payload.get("image_count", 3)
                     image_prompt = task_payload.get("image_prompt", f"A banner image about {topic}")
                     
-                    # 1. Generate Content
-                    blog_system_prompt = "You are a professional blog writer. Output JSON: {'title': '...', 'content': 'HTML body'}"
-                    blog_user_prompt = f"Topic: {topic}\nInstructions: {instructions}\nWrite the blog post."
+                    # 1. Generate Images in a loop to ensure distinct results and correct count
+                    image_urls = []
+                    media_ids = []
+                    task_subdir = os.path.join("workspace", "task_assets", f"wp_{int(time.time())}")
+                    os.makedirs(task_subdir, exist_ok=True)
+                    
+                    wp_user = os.getenv("WP_USER")
+                    wp_password = os.getenv("WP_PASSWORD")
+                    wp_url = os.getenv("WP_BASE_URL", "")
+                    wp = WordPressClient(wp_url, wp_user, wp_password)
+
+                    for i in range(image_count):
+                        logger.info(f"Generating image {i+1}/{image_count} for blog topic: {topic}")
+                        try:
+                            # 1.5 Rate Limit Optimization: Add a small sleep between sequential calls
+                            if i > 0:
+                                sleep_time = 5 # 5 seconds delay is safe for 20 RPM
+                                logger.info(f"Rate limit pacing: Sleeping for {sleep_time}s before next request...")
+                                await asyncio.sleep(sleep_time)
+
+                            # Slightly vary prompt to ensure model gives different scenes
+                            varied_prompt = f"{image_prompt} (Scene {i+1}: highly detailed, professional blog illustration)"
+                            gen_images = await asyncio.to_thread(generate_image_native, varied_prompt, count=1)
+                            
+                            if gen_images:
+                                img_data = gen_images[0]
+                                filename = f"blog_img_{i}_{int(time.time())}.png"
+                                local_path = os.path.join(task_subdir, filename)
+                                
+                                with open(local_path, "wb") as f:
+                                    f.write(img_data)
+                                
+                                # VERIFICATION: Send to Telegram so user sees what is being uploaded
+                                await context.bot.send_photo(chat_id=chat_id, photo=img_data, caption=f"🖼️ 为博客生成的第 {i+1} 张图片")
+                                
+                                # Upload ONLY the bytes that were just saved to workspace
+                                upload_id = await asyncio.to_thread(wp.upload_media, img_data, filename)
+                                # Fetch public URL
+                                media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
+                                img_url = media_info.get("source_url")
+                                
+                                if img_url:
+                                    image_urls.append(img_url)
+                                    media_ids.append(upload_id)
+                                    logger.info(f"Successfully uploaded and retrieved URL for Image {i+1}: {img_url}")
+                            else:
+                                logger.warning(f"Failed to generate image {i+1}: No bytes returned.")
+                        except Exception as e:
+                            logger.error(f"Error during generation/upload of Image {i+1}: {e}")
+                            # We continue to the next image instead of failing the whole task
+
+                    if not image_urls:
+                        raise Exception("Failed to generate or upload any images for the blog post.")
+
+                    # 2. Generate Content with Image URLs embedded (FORCEFUL & EXCLUSIVE PROMPT)
+                    blog_system_prompt = (
+                        "You are an expert tech blogger. "
+                        "Output exclusively in JSON format: {'title': '...', 'content': 'HTML body'}. "
+                        "The 'content' must be high-quality HTML. "
+                        "COMMAND: You MUST embed the provided image URLs at logical break points. "
+                        "STRICT RULE: Only use the exactly provided URLs (IMAGE_URL_X). "
+                        "DO NOT use any other URLs, placeholders, or external links for images. "
+                        "Format each image as: <figure><img src='URL' style='width:100%; height:auto;'/><figcaption>Descriptive caption</figcaption></figure>"
+                    )
+                    
+                    urls_list_str = "\n".join([f"- IMAGE_URL_{i+1}: {url}" for i, url in enumerate(image_urls)])
+                    blog_user_prompt = (
+                        f"Topic: {topic}\n"
+                        f"Instructions: {instructions}\n\n"
+                        f"Available Images (Embed ALL of these in order):\n{urls_list_str}\n\n"
+                        f"IMPORTANT: Use ONLY the URLs above. Write a comprehensive HTML blog post."
+                    )
     
                     blog_response = genai_client.models.generate_content(
                         model=GEMINI_MODEL_NAME,
@@ -722,31 +797,24 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     title = blog_data.get("title", topic)
                     content = blog_data.get("content", "")
     
-                    # 2. Generate Image
-                    images = await asyncio.to_thread(generate_image_native, image_prompt)
-                    if not images: raise Exception("No image generated for blog post.")
-                    
-                    # 3. WordPress Credentials (ALWAYS use .env unless user explicitly provides new ones in chat)
-                    # For now, we STRICTLY use .env to avoid LLM hallucination of dummy creds
-                    wp_user = os.getenv("WP_USER")
-                    wp_password = os.getenv("WP_PASSWORD")
-                    wp_url = os.getenv("WP_BASE_URL", "")
-                    
-                    logger.info(f"Executing WordPress task for user: {wp_user}")
-                    
-                    wp = WordPressClient(wp_url, wp_user, wp_password)
-                    media_id = await asyncio.to_thread(wp.upload_media, images[0], f"blog_{int(time.time())}.png")
-                    post_data = await asyncio.to_thread(wp.create_post, title, content, status='publish', featured_media_id=media_id)
+                    # 3. Create the Post
+                    featured_id = media_ids[0] if media_ids else None
+                    post_data = await asyncio.to_thread(wp.create_post, title, content, status='publish', featured_media_id=featured_id)
                     
                     link = post_data.get('link')
-                    await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功！\n🔗 {link}")
-                    execution_log.append(f"[System] Published blog post: {link}")
-                    
+                    await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功（包含 {len(image_urls)} 张图片）！\n🔗 {link}")
+                    execution_log.append(f"[System] Published multimedia blog post with {len(image_urls)} images: {link}")
+
+                    import shutil
+                    shutil.rmtree(task_subdir)
+                    logger.info(f"Cleaned up temporary assets: {task_subdir}")
+
                 except Exception as e:
                     logger.error(f"WP Task Failed: {e}")
                     success = False
                     error_msg = str(e)
                     execution_log.append(f"[System] Blog post failed: {e}")
+
 
         except Exception as outer_e:
             logger.error(f"Sequential Execution Error: {outer_e}")
