@@ -13,28 +13,19 @@ class WordPressClient:
         self.username = username
         self.password = password
         self.auth = HTTPBasicAuth(self.username, self.password)
-        self.headers = {
-            "User-Agent": "AIAgent/1.0 (WordPress Client)"
-        }
 
-    def upload_media(self, file_data, filename, mime_type=None):
+    def upload_media(self, file_data, filename, mime_type="image/jpeg"):
         """
         Uploads an image to the WordPress Media Library.
         file_data: bytes
         filename: str
         """
-        if not mime_type:
-            if filename.lower().endswith(".png"): mime_type = "image/png"
-            elif filename.lower().endswith(".gif"): mime_type = "image/gif"
-            else: mime_type = "image/jpeg"
-
         media_url = f"{self.base_url}/media"
         
-        headers = self.headers.copy()
-        headers.update({
+        headers = {
             "Content-Type": mime_type,
             "Content-Disposition": f"attachment; filename={filename}"
-        })
+        }
 
         logger.info(f"Uploading media: {filename} to {media_url}")
         try:
@@ -82,7 +73,7 @@ class WordPressClient:
                 posts_url,
                 auth=self.auth,
                 json=payload,
-                headers=self.headers,
+                headers={"Content-Type": "application/json"},
                 timeout=30
             )
 

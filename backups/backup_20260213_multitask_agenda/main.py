@@ -726,13 +726,10 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     images = await asyncio.to_thread(generate_image_native, image_prompt)
                     if not images: raise Exception("No image generated for blog post.")
                     
-                    # 3. WordPress Credentials (ALWAYS use .env unless user explicitly provides new ones in chat)
-                    # For now, we STRICTLY use .env to avoid LLM hallucination of dummy creds
-                    wp_user = os.getenv("WP_USER")
-                    wp_password = os.getenv("WP_PASSWORD")
+                    # 3. WordPress Credentials
+                    wp_user = task_payload.get("username") or os.getenv("WP_USER")
+                    wp_password = task_payload.get("password") or os.getenv("WP_PASSWORD")
                     wp_url = os.getenv("WP_BASE_URL", "")
-                    
-                    logger.info(f"Executing WordPress task for user: {wp_user}")
                     
                     wp = WordPressClient(wp_url, wp_user, wp_password)
                     media_id = await asyncio.to_thread(wp.upload_media, images[0], f"blog_{int(time.time())}.png")

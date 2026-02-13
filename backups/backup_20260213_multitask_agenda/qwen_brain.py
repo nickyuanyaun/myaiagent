@@ -48,7 +48,9 @@ class QwenBrain:
                     "type": "wordpress_post",
                     "topic": "The future of AI Agents",
                     "instructions": "Write a professional article...",
-                    "image_prompt": "A futuristic robot working on a laptop"
+                    "image_prompt": "A futuristic robot working on a laptop",
+                    "username": "User_Provided_Name",
+                    "password": "User_Provided_Password"
                 }},
                 {{
                     "type": "reminder",
