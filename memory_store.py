@@ -76,54 +76,74 @@ class MemoryStore:
         if user_id:
              current_uid_str = str(user_id)
              for mem in self.memories:
+                 if not isinstance(mem, dict): continue
                  # Check if metadata exists and matches
                  meta = mem.get('metadata', {})
-                 stored_uid = str(meta.get('user_id', 'None'))
+                 if not isinstance(meta, dict): continue
                  
-                 # PARANOID DEBUGGING
-                 # logger.info(f"Compare: Stored '{stored_uid}' vs Req '{current_uid_str}' -> {stored_uid == current_uid_str}")
-                 
-                 if stored_uid == current_uid_str:
-                     relevant_memories.append(mem)
+                 # Comparison: handle both int and str in storage
+                 stored_uid = meta.get('user_id')
+                 if stored_uid is not None and str(stored_uid) == current_uid_str:
+                      relevant_memories.append(mem)
              
              logger.info(f"SEARCH DEBUG: User {user_id} | Total Mem: {len(self.memories)} | Match: {len(relevant_memories)}")
         else:
-             # Fallback if no user_id provided (dev mode), search all
-             relevant_memories = self.memories
+             relevant_memories = [m for m in self.memories if isinstance(m, dict)]
              logger.warning("SEARCH DEBUG: No user_id provided! Searching ALL memories.")
         
-        # Log the content of matches to ensure no contamination
-        if relevant_memories:
-            logger.info(f"SEARCH MATCHES: {[m['text'][:20] for m in relevant_memories]}")
+        # Identity Heuristic: If query asks "who am I" etc, prioritize identity facts
+        identity_keywords = ["谁", "名字", "who", "name", "identity", "记忆"]
+        is_identity_query = any(k in query.lower() for k in identity_keywords)
 
         for mem in relevant_memories:
             score = 0
-            content = mem['text'].lower()
+            text_val = mem.get('text', '')
+            if not isinstance(text_val, str): continue
+            content = text_val.lower()
             
             if is_chinese:
-                # Char-level overlap for Chinese
                 q_chars = set(query)
                 c_chars = set(content)
                 overlap = len(q_chars.intersection(c_chars))
                 if overlap > 0:
                     score = overlap
             else:
-                # Standard keyword match for space-delimited langs
                 keywords = query.lower().split()
                 for kw in keywords:
                     if kw in content:
-                        score += 1
+                        score += 5 # Higher weight for word match
+            
+            # Identity Bonus
+            if is_identity_query:
+                 if any(k in content for k in ["name is", "名字是", "我是", "昵称", "id是"]):
+                      score += 10
             
             if score > 0:
-                scored.append((score, mem['text']))
+                scored.append((score, text_val))
         
-        # Sort by score desc
         scored.sort(key=lambda x: x[0], reverse=True)
         
-        # If no keywords match, maybe return most recent?
-        if not scored:
-             # Return last 3 from RELEVANT filtered memories only
-             return [m['text'] for m in relevant_memories[-3:]]
+        # If no keywords match, or for identity queries, return a broader window
+        if not scored or is_identity_query:
+             # Mix of Identity facts and Most Recent
+             results = []
+             if is_identity_query:
+                  # Find memories that look like profile facts
+                  for m in relevant_memories:
+                       txt = m.get('text', '')
+                       if any(k in txt.lower() for k in ["name is", "名字是", "我是", "昵称", "id是"]):
+                            results.append(txt)
+                  results = results[:5]
+             
+             # Fill/Add most recent
+             recent = [m.get('text', '') for m in relevant_memories if isinstance(m, dict)]
+             recent.reverse() # Newest first
+             for r in recent:
+                  if r and r not in results:
+                       results.append(r)
+                  if len(results) >= 20: break
+             
+             return results
         
         return [s[1] for s in scored[:n_results]]
 

@@ -473,9 +473,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             try:
                 retrieved_docs = await asyncio.to_thread(qwen_brain.filter_memories, user_input, candidates)
                 logger.info(f"Memory Filter: {len(candidates)} -> {len(retrieved_docs)}")
+                # FALLBACK: If filter returns nothing but candidates exist, use top 5
+                if candidates and not retrieved_docs:
+                     logger.warning("DeepSeek filter returned 0 results. Using top 5 candidates as fallback.")
+                     retrieved_docs = candidates[:5]
             except Exception as e:
-                logger.error(f"Filter failed, using top 3: {e}")
-                retrieved_docs = candidates[:3]
+                logger.error(f"Filter failed, using top 5: {e}")
+                retrieved_docs = candidates[:5]
         else:
             retrieved_docs = candidates[:3]
 
@@ -619,10 +623,56 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
              messages.append({"role": "system", "content": download_status_msg})
         
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        response = await client.chat.completions.create(
-            model=OPENAI_MODEL_NAME, temperature=0.6, messages=messages
-        )
-        msg_content = response.choices[0].message.content
+
+        # --- Phase 2: Online Brain (Gemini Chat) ---
+        try:
+            # Construct History for Gemini (Native SDK uses 'contents' with 'role' and 'parts')
+            # We map 'user' -> 'user', 'assistant' -> 'model', 'system' -> 'user' (system prompt separate)
+            
+            gemini_history = []
+            
+            # Add past history from memory
+            for msg in context.user_data.get('history', []):
+                role = msg['role']
+                content = msg['content']
+                if role == 'user':
+                    gemini_history.append(types.Content(role='user', parts=[types.Part.from_text(text=str(content))]))
+                elif role == 'assistant':
+                    gemini_history.append(types.Content(role='model', parts=[types.Part.from_text(text=str(content))]))
+                # System messages in history are skipped or treated as user context if crucial
+            
+            # Define System Instruction
+            sys_instruct = get_system_prompt(memory_context)
+            if download_status_msg:
+                sys_instruct += f"\n\n[System Update]: {download_status_msg}"
+
+            # Create Chat Session
+            chat = genai_client.chats.create(
+                model="gemini-3-flash-preview",
+                history=gemini_history,
+                config=types.GenerateContentConfig(
+                    temperature=0.6,
+                    system_instruction=sys_instruct
+                )
+            )
+            
+            # Send current message
+            # If image exists, add it to the prompt parts
+            prompt_parts = [user_input]
+            if all_images:
+                for b64 in all_images:
+                     # Decode b64 to bytes for SDK
+                     img_data = base64.b64decode(b64)
+                     prompt_parts.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
+
+            response = await asyncio.to_thread(chat.send_message, prompt_parts)
+            msg_content = response.text
+            
+            logger.info(f"Gemini Response: {msg_content}")
+
+        except Exception as e:
+            logger.error(f"Gemini Chat Error: {e}")
+            msg_content = f"Error communicating with Gemini: {e}"
         if not msg_content:
              logger.warning(f"Empty content from model. Finish reason: {response.choices[0].finish_reason}")
              # If we performed an action (like download), an empty response is acceptable/expected.

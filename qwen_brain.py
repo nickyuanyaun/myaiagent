@@ -172,6 +172,7 @@ class QwenBrain:
              if content.startswith("```json"): content = content[7:]
              if content.endswith("```"): content = content[:-3]
              
+             logger.info(f"DeepSeek Filter Output (Indices): {content}")
              indices = json.loads(content.strip())
              
              if isinstance(indices, list):
@@ -179,6 +180,9 @@ class QwenBrain:
                  for i in indices:
                      if isinstance(i, int) and 0 <= i < len(candidate_memories):
                          selected.append(candidate_memories[i])
+                 
+                 if not selected:
+                      logger.warning("DeepSeek Filter returned empty list.")
                  return selected
              return []
              
