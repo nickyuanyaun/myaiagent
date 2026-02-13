@@ -70,17 +70,18 @@ class TaskStore:
         self._save()
 
     # --- Download Queue Methods ---
-    def add_download_request(self, chat_id: int):
+    def add_download_request(self, chat_id: int, url: str = None):
         task = {
             "id": str(uuid.uuid4()),
             "type": "download_req",
             "chat_id": chat_id,
+            "url": url,
             "status": "pending",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         self.tasks.append(task)
         self._save()
-        logger.info(f"Added download request for chat_id: {chat_id}")
+        logger.info(f"Added download request for chat_id: {chat_id}, url: {url}")
         return task
 
     def get_next_download_request(self):
@@ -92,25 +93,42 @@ class TaskStore:
         pending.sort(key=lambda x: x["created_at"])
         return pending[0] if pending else None
 
-    def cleanup_stale_tasks(self, hours=2):
+    def get_all_pending_download_requests(self):
+        """
+        Returns all pending download requests sorted by time.
+        """
+        pending = [t for t in self.tasks if t.get("type") == "download_req" and t["status"] == "pending"]
+        pending.sort(key=lambda x: x["created_at"])
+        return pending
+
+    def cleanup_stale_tasks(self, hours=0.17): # Default ~10 mins (0.17 hours)
         """
         Mark tasks as failed if they have been pending for too long.
+        Returns a list of failed tasks.
         """
         now = datetime.now()
-        count = 0
+        failed_tasks = []
+        
         for task in self.tasks:
             if task["status"] == "pending":
                 try:
+                    # Skip Reminders (they are time-based, not duration-based)
+                    if task.get("type") in ["reminder", "reminder_task"]:
+                        continue
+
                     created_at = datetime.strptime(task["created_at"], "%Y-%m-%d %H:%M:%S")
                     diff = (now - created_at).total_seconds()
-                    if diff > hours * 3600:
+                    timeout_seconds = hours * 3600
+                    
+                    if diff > timeout_seconds:
                         task["status"] = "failed"
-                        logger.warning(f"Task {task['id']} marked as failed due to timeout.")
-                        count += 1
+                        failed_tasks.append(task)
+                        logger.warning(f"Task {task['id']} ({task.get('type')}) marked as failed due to timeout.")
+
                 except ValueError: 
                     pass # Ignore parse errors
         
-        if count > 0:
+        if failed_tasks:
             self._save()
-            return count
-        return 0
+            
+        return failed_tasks

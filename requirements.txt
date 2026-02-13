@@ -1,8 +1,8 @@
-openai
 python-dotenv
-ddgs
-python-telegram-bot[job-queue]
-APScheduler
-ollama
-chromadb
+openai
 google-genai
+python-telegram-bot
+ddgs
+duckduckgo-search
+pillow
+requests

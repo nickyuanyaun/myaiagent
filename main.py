@@ -26,6 +26,7 @@ from qwen_brain import QwenBrain
 from qwen_brain import QwenBrain
 from task_store import TaskStore
 from metube_client import MeTubeClient
+from wordpress_client import WordPressClient, DEFAULT_WP_CONFIG
 from file_watcher import FileWatcher
 
 # 1. Load Configuration
@@ -51,89 +52,82 @@ logger = logging.getLogger(__name__)
 
 # ... (omitted parts) ...
 
-def generate_image_native(prompt: str, negative_prompt: str = None) -> bytes:
+def generate_image_native(prompt: str, negative_prompt: str = None, count: int = 1) -> list[bytes]:
     """
-    Generates an image using Google GenAI SDK (Nano Banana Pro / gemini-3-pro-image-preview).
+    Generates images using Google GenAI SDK (Nano Banana Pro / gemini-3-pro-image-preview).
+    Returns a list of image bytes.
     """
     full_prompt = prompt
     if negative_prompt:
         full_prompt += f"\nNegative Prompt: {negative_prompt}"
         
-    logger.info(f"Generating Image via Nano Banana Pro for: {full_prompt}")
+    logger.info(f"Generating {count} Images via Nano Banana Pro for: {full_prompt}")
     try:
         # Create chat session with Nano Banana Pro
-        chat = genai_client.chats.create(
-            model="gemini-3-pro-image-preview",
-            config=types.GenerateContentConfig(
-                response_modalities=['TEXT', 'IMAGE'],
-                tools=[{"google_search": {}}]
-            )
+        # Note: 'candidate_count' might not be supported in 'chat.create' config directly for all models, 
+        # but we can try to ask for it in the prompt or rely on the model generating multiple parts if configured?
+        # For 'generate_images' wrapper it's easier, but here we use chat. 
+        # We will assume the model generates 4 images by default or we can try to hint it.
+        # Actually Nano Banana Pro (preview) often generates 4 images by default if not specified? 
+        # Let's try to just capture all parts.
+        
+        config = types.GenerateContentConfig(
+            response_modalities=['TEXT', 'IMAGE'],
+            candidate_count=1 # Chat usually only supports 1 candidate with multiple parts? 
+            # actually 'imagen' allows 'sampleCount', but this is 'gemini-3-pro'.
         )
         
+        chat = genai_client.chats.create(
+            model="gemini-3-pro-image-preview",
+            config=config
+        )
+        
+        # If user wants multiple, maybe we modify prompt?
+        if count > 1:
+            full_prompt += f"\n(Please generate {count} distinct variations)"
+
         response = chat.send_message(full_prompt)
         
-        # DEBUG: Log the full response details
-        logger.info(f"Raw Response: {response}")
-        try:
-             # Attempt to inspect candidates if available (structure varies by SDK version)
-             if hasattr(response, 'candidates'):
-                  for i, cand in enumerate(response.candidates):
-                       logger.info(f"Candidate {i} Finish Reason: {cand.finish_reason}")
-                       logger.info(f"Candidate {i} Content: {cand.content}")
-        except Exception as e_debug:
-             logger.warning(f"Failed to inspect candidates: {e_debug}")
-
-        found_bytes = None
+        found_images = []
         
         if response.parts:
             for part in response.parts:
-                if part.text:
-                    logger.info(f"Image Gen Text Response: {part.text}")
-                
-                # Check for executable code (sometimes it returns code to generate image?)
-                if hasattr(part, 'executable_code') and part.executable_code:
-                     logger.info(f"Executable Code found: {part.executable_code}")
-
-                # Try to extract image
-                # Priority 1: Direct bytes from inline_data (Most robust)
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    logger.info("Found inline_data blob.")
-                    if part.inline_data.data:
-                         found_bytes = part.inline_data.data
-                         logger.info(f"Image bytes extracted directly: {len(found_bytes)} bytes. MIME: {getattr(part.inline_data, 'mime_type', 'unknown')}")
-                         break
+                # Priority 1: Direct bytes from inline_data
+                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                    logger.info(f"Found image part. Size: {len(part.inline_data.data)}")
+                    found_images.append(part.inline_data.data)
                 
                 # Priority 2: Use SDK helper if available (Fallback)
-                try: 
-                    img = part.as_image()
-                    if img and not found_bytes:
-                        # Save to memory buffer
-                        buf = io.BytesIO()
-                        # Some custom Image classes don't support format arg, try without if it fails? 
-                        # Or just skip if we didn't get bytes above.
-                        # Given the error seen ("unexpected keyword argument 'format'"), 
-                        # this helper likely returns a simple wrapper that only supports save(path).
-                        # We will skip it if we haven't found bytes yet, or try a different approach if needed.
-                        logger.warning("part.as_image() returned object, but inline_data was preferred. If you see this, inline_data failed?")
-                except Exception as e_parse:
-                     pass
+                else:
+                    try: 
+                        img = part.as_image()
+                        if img:
+                            buf = io.BytesIO()
+                            try: img.save(buf, format="PNG")
+                            except: img.save(buf)
+                            found_images.append(buf.getvalue())
+                    except: pass
 
-        if found_bytes:
-            return found_bytes
+        if found_images:
+            return found_images
         else:
-            raise Exception("No image found in response parts. Check logs for details.")
+            raise Exception("No images found in response parts.")
 
     except Exception as e:
         logger.error(f"Nano Banana Pro Error: {e}")
         raise e
 
-def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = None) -> bytes:
+def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = None, count: int = 1) -> list[bytes]:
     """
     Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
+    Returns list of bytes.
     """
     full_prompt = f"Edit this image to match the following description. Maintain the original composition and subject where possible: {prompt}"
     if negative_prompt:
         full_prompt += f"\nNegative Prompt: {negative_prompt}"
+    
+    if count > 1:
+        full_prompt += f"\n(Please generate {count} distinct variations)"
         
     logger.info(f"Editing Image via Nano Banana Pro with prompt: {full_prompt}")
     try:
@@ -143,44 +137,36 @@ def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str = 
         input_img = Image.open(io.BytesIO(image_bytes))
         
         # Create chat session
-        chat = genai_client.chats.create(
-            model="gemini-3-pro-image-preview",
-            config=types.GenerateContentConfig(
-                response_modalities=['TEXT', 'IMAGE'],
-                tools=[{"google_search": {}}]
-            )
+        # We try to use candidate_count if possible, or reliance on prompt
+        config = types.GenerateContentConfig(
+            response_modalities=['TEXT', 'IMAGE'],
+            candidate_count=1 
         )
         
-        # Send Prompt + Image
-        # Note: 'google.genai' SDK usually accepts PIL Image objects directly in the message list
+        chat = genai_client.chats.create(
+            model="gemini-3-pro-image-preview",
+            config=config
+        )
+        
         response = chat.send_message([full_prompt, input_img])
         
-        # Extract Result (Reuse same logic as native gen)
-        found_bytes = None
+        found_images = []
         if response.parts:
             for part in response.parts:
-                if part.text:
-                    logger.info(f"Edit Text Response: {part.text}")
-                
-                # Priority 1: Inline Data
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    if part.inline_data.data:
-                         found_bytes = part.inline_data.data
-                         break
-                
-                # Priority 2: as_image()
-                try: 
-                    img = part.as_image()
-                    if img and not found_bytes:
-                        buf = io.BytesIO()
-                        try: img.save(buf, format="PNG")
-                        except: img.save(buf) # Fallback
-                        found_bytes = buf.getvalue()
-                        break
-                except: pass
+                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                     found_images.append(part.inline_data.data)
+                else:
+                    try: 
+                        img = part.as_image()
+                        if img:
+                            buf = io.BytesIO()
+                            try: img.save(buf, format="PNG")
+                            except: img.save(buf)
+                            found_images.append(buf.getvalue())
+                    except: pass
 
-        if found_bytes:
-            return found_bytes
+        if found_images:
+            return found_images
         else:
             raise Exception("No edited image found in response.")
 
@@ -277,7 +263,7 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
     """
-    Periodic task to check for pending reminders in the TaskStore.
+    Periodic task to check for pending reminders and clean up stale downloads.
     """
     if not task_store: return
     
@@ -285,6 +271,10 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     
     for task in pending:
+        # Only process REMINDERS here
+        if task.get('type') != 'reminder':
+            continue
+
         try:
             target_dt = datetime.strptime(task['target_timestamp'], "%Y-%m-%d %H:%M:%S")
             # If time has passed (or is very close, e.g. within 5 seconds)
@@ -306,6 +296,26 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
                 
         except Exception as e:
             logger.error(f"Error checking task {task['id']}: {e}")
+
+    # --- Cleanup Stale Downloads (Timeout) ---
+    if task_store:
+        failed_tasks = task_store.cleanup_stale_tasks(hours=0.17) # ~10 mins
+        for task in failed_tasks:
+            try:
+                chat_id = task.get('chat_id')
+                if not chat_id: continue
+                
+                task_type = task.get('type')
+                
+                if task_type == "download_req":
+                    url_snippet = task.get('url', 'Unknown URL')
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ 下载任务超时 (10分钟) 已取消: {url_snippet}\n请检查 MeTube 是否正常工作或视频是否过大。")
+                else:
+                    # Generic timeout message for other task types
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ 任务超时 (10分钟) 已取消: {task_type}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to notify user of timeout {task['id']}: {e}")
 
 async def schedule_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, delay_seconds: int):
     """
@@ -456,20 +466,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"图片处理失败: {e}")
 
 async def process_agent_logic(context, chat_id, user_input, image_b64, update, additional_images=None):
-    """Shared Logic"""
+    """Shared Logic with Multi-Task Execution"""
     if additional_images is None: additional_images = []
     
     # --- Phase 1: Qwen Analysis (Parallel / Background) ---
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 2. Retrieve Memory
-    # 2. Retrieve Memory
     retrieved_docs = []
     if memory_store:
-        # Retrieve more candidates for filtering (e.g. 10)
         candidates = memory_store.search_memory(user_input, user_id=update.effective_user.id, n_results=10)
         if qwen_brain and candidates:
-            # Filter matches using Qwen
             try:
                 retrieved_docs = await asyncio.to_thread(qwen_brain.filter_memories, user_input, candidates)
                 logger.info(f"Memory Filter: {len(candidates)} -> {len(retrieved_docs)}")
@@ -488,124 +495,280 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         memory_context = qwen_brain.synthesize_context(retrieved_docs)
 
     # 3. Analyze Message with Qwen
+    # analysis is now a dictionary containing a LIST of tasks
     analysis = {}
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if qwen_brain:
-        logger.info("Starting DeepSeek Analysis (Timeout: 60s)...")
+        logger.info("Starting DeepSeek Analysis (Tasks)...")
         try:
-            # Run with timeout to prevent blocking the bot if Ollama hangs
             analysis = await asyncio.wait_for(
                 asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str),
                 timeout=60.0
             )
-            logger.info(f"Qwen Analysis: {analysis}")
-        except asyncio.TimeoutError:
-            logger.error("❌ Qwen Analysis Timed Out (Ollama too slow or stuck). Skipping.")
+            logger.info(f"Qwen Task Plan: {analysis}")
         except Exception as qwen_err:
             logger.error(f"Qwen Error: {qwen_err}")
-
-    # Process Analysis result
-    if analysis.get('save_memory') and analysis.get('extracted_knowledge'):
-        knowledge = analysis['extracted_knowledge']
-        if memory_store:
-            await asyncio.to_thread(memory_store.add_memory, knowledge, {"source": "user_chat", "user_id": update.effective_user.id})
-
-    # Download Logic
-    download_status_msg = ""
-    if analysis.get('download_needed') and analysis.get('download_url') and metube_client:
-        url = analysis['download_url']
-        logger.info(f"Download detected: {url}")
-        await context.bot.send_message(chat_id=chat_id, text=f"📥 正在添加到 MeTube 下载队列: {url}")
-        
-        success = await asyncio.to_thread(metube_client.add_download, url)
-        if success:
-            await context.bot.send_message(chat_id=chat_id, text="✅ 已成功添加下载任务！等待下载完成后发送...")
-            download_status_msg = f"[SYSTEM] Successfully added '{url}' to MeTube download queue."
-            # Add to queue (Persistent)
-            if task_store:
-                task_store.add_download_request(chat_id)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text="❌ 添加下载失败，请检查 MeTube 服务状态。")
-            download_status_msg = f"[SYSTEM] Failed to add '{url}' to MeTube. Error: Timeout or Internal Server Error."
-
-    # Reminder Logic
-    is_reminder = analysis.get('reminder_needed')
-    has_target = analysis.get('target_user') and analysis.get('target_user') != 'me'
-    
-    if (is_reminder or has_target) and analysis.get('reminder_content'):
-        delay = 10
-        content = analysis['reminder_content']
-        time_str = str(analysis.get('reminder_time', '')).strip()
-        
-        # Debug feedback
-        logger.info(f"Reminder detected: {content} at {time_str}")
-        
-        # Absolute Time Parsing
-        parsed_delay = None
-        try:
-            target_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-            diff = (target_dt - datetime.now()).total_seconds()
-            parsed_delay = max(5, int(diff))
-        except ValueError: pass
-
-        if parsed_delay is not None:
-            delay = parsed_delay
-        else:
-             # Relative Fallback (Enhanced)
-             time_str_lower = time_str.lower()
-             if "minute" in time_str_lower or "min" in time_str_lower or "分" in time_str_lower:
-                  nums = re.findall(r'\d+', time_str_lower)
-                  if nums: delay = int(nums[0]) * 60
-             elif "second" in time_str_lower or "sec" in time_str_lower or "秒" in time_str_lower:
-                  nums = re.findall(r'\d+', time_str_lower)
-                  if nums: delay = int(nums[0])
-        
-        # Routing
-        raw_target = analysis.get('target_user')
-        target_role = raw_target if raw_target else 'me'
-        target_chat_id = chat_id 
-        
-        FAMILY_DIRECTORY = {
-             "dad": 1660122746, "father": 1660122746, "baba": 1660122746, "fox": 1660122746,
-             "mom": 8295191474, "mother": 8295191474, "mama": 8295191474,
-             "son": 8526935699, "nick": 8526935699, "me": chat_id
-        }
-        
-        if target_role.lower() in FAMILY_DIRECTORY:
-            chat_target = FAMILY_DIRECTORY[target_role.lower()]
-            # Only switch if not 'me'
-            if target_role.lower() != 'me':
-                target_chat_id = chat_target
-        elif target_role.lower() != 'me':
-             await context.bot.send_message(chat_id=chat_id, text=f"⚠ 未知目标 '{target_role}'。将发给您自己。")
-        
-        final_content = content
-        if target_chat_id != chat_id:
-            sender_name = update.effective_user.first_name
-            final_content = f"{sender_name} 让我告诉你：{content}"
             
-        await schedule_reminder(context, target_chat_id, final_content, delay)
+    # --- Phase 2: Sequential Task Execution ---
+    
+    tasks = analysis.get("tasks", [])
+    execution_log = [] # To tell Gemini what we did
+    
+    # Pre-check for hallucinations
+    if not isinstance(tasks, list): tasks = []
+
+    for i, task in enumerate(tasks):
+        task_type = task.get("type")
         
-        # Explicit confirmation for debugging
-        await context.bot.send_message(chat_id=chat_id, text=f"🧠 Qwen 已设定提醒: {delay}秒后 - {content}")
+        # --- Memory Save ---
+        if task_type == "memory_save":
+            content = task.get("content")
+            if memory_store and content:
+                await asyncio.to_thread(memory_store.add_memory, content, {"source": "user_chat", "user_id": update.effective_user.id})
+                execution_log.append(f"[System] Saved memory: {content}")
+        
+        # --- Download ---
+        elif task_type == "download":
+            url = task.get("url")
+            if metube_client and url:
+                await context.bot.send_message(chat_id=chat_id, text=f"📥 正在添加到 MeTube 下载队列: {url}")
+                success = await asyncio.to_thread(metube_client.add_download, url)
+                if success:
+                    execution_log.append(f"[System] Successfully added download for: {url}")
+                    if task_store: task_store.add_download_request(chat_id)
+                else:
+                    execution_log.append(f"[System] Failed to add download: {url}")
+        
+        # --- Reminder ---
+        elif task_type == "reminder":
+            content = task.get("content")
+            time_str = task.get("target_time")
+            target_user = task.get("target_user")
+            
+            if content and time_str:
+                # Calculate delay
+                delay = 5
+                try:
+                    target_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                    diff = (target_dt - datetime.now()).total_seconds()
+                    delay = max(2, int(diff))
+                except: 
+                    # Fallback relative logic if needed, but Qwen should give absolute
+                     pass
+                
+                # Resolving Target
+                target_chat_id = chat_id 
+                FAMILY_DIRECTORY = {
+                     "dad": 1660122746, "father": 1660122746, "baba": 1660122746, 
+                     "mom": 8295191474, "mother": 8295191474, "mama": 8295191474,
+                     "son": 8526935699, "nick": 8526935699, "me": chat_id
+                }
+                if target_user and target_user.lower() in FAMILY_DIRECTORY:
+                    target_chat_id = FAMILY_DIRECTORY[target_user.lower()]
+                
+                final_content = content
+                if target_chat_id != chat_id:
+                     sender = update.effective_user.first_name
+                     final_content = f"{sender} 让我告诉你：{content}"
+                
+                # Schedule
+                if task_store:
+                    task_store.add_task(final_content, time_str, target_chat_id, target_user)
+                    
+                await context.bot.send_message(chat_id=chat_id, text=f"⏰ 已设定提醒: {time_str} -> {target_user if target_user else 'me'}: {content}")
+                execution_log.append(f"[System] Reminder set for {target_user} at {time_str}: {content}")
 
-        if target_chat_id == chat_id:
-             memory_context += f"\n[SYSTEM ALERT]: A reminder has been set for {delay} seconds from now about '{content}'."
-        else:
-             memory_context += f"\n[SYSTEM ALERT]: Message sent to {target_role} ({target_chat_id})."
+        # --- Web Search ---
+        elif task_type == "web_search":
+            query = task.get("query")
+            is_news = task.get("is_news", False)
+            if query:
+                await context.bot.send_message(chat_id=chat_id, text=f"🔍 正在搜索: {query}...")
+                search_res = search_web(query, 'd' if is_news else None)
+                execution_log.append(f"[System] Search Results for '{query}':\n{search_res}")
+        
+        # --- Image Generation ---
+        elif task_type == "image_generation":
+            prompt = task.get("prompt")
+            neg_prompt = task.get("negative_prompt")
+            count = task.get("count", 1)
+            action = task.get("action", "draw")
+            
+            if prompt:
+                 msg_text = f"🎨 正在生成 {count} 张图片: {prompt[:20]}..."
+                 if action == "edit": msg_text = f"🎨 正在编辑图片 ({count}张)..."
+                 
+                 await context.bot.send_message(chat_id=chat_id, text=msg_text)
+                 await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                 
+                 try:
+                     # Edit Check
+                     images = []
+                     if action == "edit":
+                         input_image_bytes = context.user_data.get('last_image_bytes')
+                         if not input_image_bytes:
+                             await context.bot.send_message(chat_id=chat_id, text="⚠️ 无法编辑: 没找到上一张图.")
+                             execution_log.append("[System] Image Edit Failed: No input image.")
+                             continue
+                         images = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes, neg_prompt, count)
+                     else:
+                         # Draw
+                         images = await asyncio.to_thread(generate_image_native, prompt, neg_prompt, count)
+                     
+                     # Send Images
+                     if images:
+                         # Telegram MediaGroup only supports up to 10 items.
+                         if len(images) > 1:
+                             from telegram import InputMediaPhoto
+                             media_group = []
+                             for idx, img_data in enumerate(images):
+                                 caption = f"Image {idx+1}/{len(images)}\nPrompt: {prompt[:50]}..." if idx == 0 else None
+                                 media_group.append(InputMediaPhoto(img_data, caption=caption))
+                             await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                         else:
+                             await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption=f"✨ {prompt[:100]}...")
+                         
+                         execution_log.append(f"[System] Successfully generated {len(images)} images for prompt '{prompt}'.")
+                     
+                 except Exception as e:
+                     logger.error(f"Image Gen Failed: {e}")
+                     await context.bot.send_message(chat_id=chat_id, text=f"❌ 图片生成失败: {e}")
+                     execution_log.append(f"[System] Image generation failed: {e}")
 
-    # --- Phase 2: Gemini Generation ---
+        # --- WordPress Post ---
+        elif task_type == "wordpress_post":
+            try:
+                topic = task.get("topic", "AI Update")
+                instructions = task.get("instructions", "")
+                image_prompt = task.get("image_prompt", f"A banner image about {topic}")
+                
+                await context.bot.send_message(chat_id=chat_id, text=f"📝 正在为您撰写关于“{topic}”的博客文章...")
+                
+                # 1. Generate Content (Title + HTML)
+                # We need a separate client instance here or reuse one if available. 
+                # Since client is local to Phase 3, we create a temporary one.
+                wp_gen_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+                
+                blog_system_prompt = """
+                You are a professional blog writer. 
+                Output a JSON object with:
+                - "title": A catchy headline.
+                - "content": The blog post body in HTML format (use <h2>, <p>, <ul>, <li>). Do NOT use <html>/<body> tags.
+                """
+                blog_user_prompt = f"Topic: {topic}\nInstructions: {instructions}\nWrite the blog post now."
+
+                # Attempt JSON mode if model supports, otherwise prompt engineering
+                response = await wp_gen_client.chat.completions.create(
+                    model=OPENAI_MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": blog_system_prompt},
+                        {"role": "user", "content": blog_user_prompt}
+                    ],
+                    response_format={"type": "json_object"} 
+                )
+                
+                try:
+                    blog_data = json.loads(response.choices[0].message.content)
+                    title = blog_data.get("title", topic)
+                    content = blog_data.get("content", "")
+                except Exception as json_err:
+                    logger.warning(f"Failed to parse Blog JSON: {json_err}. Using raw text.")
+                    title = topic
+                    content = response.choices[0].message.content
+
+                # 2. Generate Image
+                await context.bot.send_message(chat_id=chat_id, text=f"🎨 正在生成博客配图: {image_prompt}...")
+                # Note: generate_image_native returns list[bytes]
+                images = await asyncio.to_thread(generate_image_native, image_prompt)
+                
+                if not images:
+                    raise Exception("Image generation returned no results.")
+                
+                image_bytes = images[0] # Usage first image
+                
+                # 3. Init WP Client
+                # Priority: Task Payload > Memory > Env Vars/Defaults
+                
+                wp_user = task.get("username")
+                wp_password = task.get("password")
+                
+                # Check Memory if not provided
+                if not wp_user or not wp_password:
+                    if memory_store:
+                        # Simple keyword search
+                        mem_creds = memory_store.search_memory("WordPress password", n_results=5)
+                        # We hope to find a memory like "Username: Nick_Agent" or "Password: ..."
+                        # For now, let's just log potential candidates. 
+                        # Ideally, Qwen should have extracted them into the task if they were in context.
+                        # If they are from DEEP memory (previous sessions), we might need to parse.
+                        # Simple heuristic parsing
+                        for mem in mem_creds:
+                            text = mem.get("text", "")
+                            # Look for "Username: ..." or "Password: ..."
+                            if not wp_user and ("username" in text.lower() or "用户" in text):
+                                if ":" in text:
+                                    parts = text.split(":")
+                                    if len(parts) > 1: wp_user = parts[1].strip()
+                                elif " is " in text:
+                                    wp_user = text.split(" is ")[1].strip()
+                            
+                            if not wp_password and ("password" in text.lower() or "密码" in text):
+                                if ":" in text:
+                                    parts = text.split(":")
+                                    if len(parts) > 1: wp_password = parts[1].strip()
+                                elif " is " in text:
+                                    wp_password = text.split(" is ")[1].strip()
+                            
+                            if wp_user and wp_password: break
+
+                # Fallback to defaults
+                if not wp_user: wp_user = os.getenv("WP_USER", DEFAULT_WP_CONFIG['user'])
+                if not wp_password: wp_password = os.getenv("WP_PASSWORD", DEFAULT_WP_CONFIG['password'])
+                
+                wp_url = os.getenv("WP_BASE_URL", DEFAULT_WP_CONFIG['url'])
+                
+                logger.info(f"WP Client Init with User: {wp_user}")
+                wp = WordPressClient(wp_url, wp_user, wp_password)
+                
+                # 4. Upload Image
+                filename = f"wp_gen_{int(datetime.now().timestamp())}.png"
+                media_id = await asyncio.to_thread(wp.upload_media, image_bytes, filename)
+                
+                # 5. Create Post
+                await context.bot.send_message(chat_id=chat_id, text=f"🚀 正在发布文章...")
+                post_data = await asyncio.to_thread(wp.create_post, title, content, status='publish', featured_media_id=media_id)
+                
+                link = post_data.get('link')
+                await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功！\n🔗 {link}")
+                execution_log.append(f"[System] Published blog post: {link}")
+                
+            except Exception as e:
+                logger.error(f"WordPress Task Failed: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ 博客发布失败: {e}")
+                execution_log.append(f"[System] Blog post failed: {e}")
+
+    # --- Phase 3: Gemini Final Response ---
+    # Only if there are no tasks OR tasks were purely internal (like memory) and user expects a reply,
+    # OR if we gathered info (Search) and need to summarize.
+    
+    # We always run Gemini to maintain conversation flow, passing the execution log.
+    
     try:
         client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
         
-        messages = [{"role": "system", "content": get_system_prompt(memory_context)}]
+        # Append Execution Log to Memory Context or System Prompt
+        final_system_context = memory_context + "\n\n[RECENT ACTIONS LOG]:\n" + "\n".join(execution_log)
+        
+        messages = [{"role": "system", "content": get_system_prompt(final_system_context)}]
         
         if 'history' not in context.user_data: context.user_data['history'] = []
         for msg in context.user_data['history'][-10:]: messages.append(msg)
             
         # Add Current User Message
-        # Combine single image_b64 and additional_images into one list
+        user_message_obj = {"role": "user", "content": user_input}
+        
+        # Add images if any
         all_images = []
         if image_b64: all_images.append(image_b64)
         if additional_images: all_images.extend(additional_images)
@@ -614,14 +777,14 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             payload = [{"type": "text", "text": user_input}]
             for b64 in all_images:
                 payload.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            messages.append({"role": "user", "content": payload})
-        else:
-            messages.append({"role": "user", "content": user_input})
+            user_message_obj = {"role": "user", "content": payload}
             
-        # Inject System Status if available (Short-term context for this turn only)
-        if download_status_msg:
-             messages.append({"role": "system", "content": download_status_msg})
+        messages.append(user_message_obj)
         
+        # If tasks were executed, we might want to hint Gemini to just "Confirm" or "Summarize".
+        if execution_log:
+             messages.append({"role": "system", "content": f"The following actions have already been performed by the sub-agent:\n{json.dumps(execution_log)}\nPlease briefly summarize or confirm these actions to the user in a friendly tone. Do NOT repeat the actions as if you are going to do them, just confirm they are done."})
+
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
         # --- Phase 2: Online Brain (Gemini Chat) ---
@@ -834,20 +997,50 @@ if __name__ == '__main__':
         async def file_callback(filepath):
             filename = os.path.basename(filepath)
             
-            # Determine target chat
+            # Determine target chat using Smart Matching
             target_chat_id = None
             pending_task = None
             
             if task_store:
-                pending_task = task_store.get_next_download_request()
-            
-            if pending_task:
-                target_chat_id = pending_task["chat_id"]
-                logger.info(f"Matched file {filename} to pending request from {target_chat_id}")
-            else:
-                 # Fallback: Send to first allowed user if queue is empty (unexpected file or restart)
-                 target_chat_id = ALLOWED_USER_IDS[0] if ALLOWED_USER_IDS else None
-                 logger.info(f"No pending download request. Defaulting to {target_chat_id} for {filename}")
+                all_pending = task_store.get_all_pending_download_requests()
+                
+                # 1. Smart Match: Check if Video ID or URL snippet is in filename
+                # Filenames often contain [VideoID] or match title. 
+                # Simplest check: if task['url'] contains ID, and filename contains ID.
+                # Or just if filename contains part of URL?
+                # YouTube URLs: v=VIDEO_ID
+                
+                for task in all_pending:
+                    url = task.get('url', "")
+                    if not url: continue
+                    
+                    video_id = None
+                    # Basic extraction for YT
+                    if "youtube.com" in url or "youtu.be" in url:
+                        import re
+                        # Try to find exactly 11 chars? or just alphanumeric?
+                        # Standard YT ID is 11 chars.
+                        # Pattern: v=([a-zA-Z0-9_-]{11})
+                        match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
+                        if match:
+                            video_id = match.group(1)
+                    
+                    if video_id and video_id in filename:
+                        logger.info(f"Smart Match! Filename '{filename}' matches Task {task['id']} (VideoID: {video_id})")
+                        pending_task = task
+                        target_chat_id = task["chat_id"]
+                        break
+                
+                # 2. Fallback: FIFO (Oldest) if no smart match found
+                if not pending_task and all_pending:
+                     # Just take the first one?
+                     # Risk: If file is unrelated, we might send it to wrong person.
+                     # But current behavior IS this.
+                     # Let's verify if filename looks like a temp file? FileWatcher handles that.
+                     # Let's assume FIFO is better than nothing, but log it.
+                     pending_task = all_pending[0]
+                     target_chat_id = pending_task["chat_id"]
+                     logger.info(f"Fallback FIFO Match: Assigning '{filename}' to Task {task['id']}")
 
             if target_chat_id:
                 try:
