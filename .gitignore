@@ -4,3 +4,11 @@ __pycache__/
 data/
 *.db
 *.sqlite
+backups/
+.venv/
+workspace/
+node_modules/
+dist/
+build/
+.agent/
+*.log
