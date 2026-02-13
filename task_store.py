@@ -3,6 +3,7 @@ import os
 import logging
 import uuid
 from datetime import datetime
+from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,15 @@ class TaskStore:
         except Exception as e:
             logger.error(f"Failed to save tasks: {e}")
 
-    def add_task(self, content: str, target_timestamp: str, chat_id: int, target_user: str = "me"):
+    def add_task(self, content: str, target_timestamp: str, chat_id: int, target_user: str = "me", batch_id: Optional[str] = None):
         """
-        Adds a new task.
+        Adds a new reminder task.
         target_timestamp should be an ISO format string: YYYY-MM-DD HH:MM:SS
         """
-        task = {
+        task: Dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "type": "reminder",
+            "batch_id": batch_id,
             "content": content,
             "target_timestamp": target_timestamp,
             "chat_id": chat_id,
@@ -51,29 +53,62 @@ class TaskStore:
         }
         self.tasks.append(task)
         self._save()
-        logger.info(f"Added task: {content} at {target_timestamp}")
+        logger.info(f"Added reminder: {content} at {target_timestamp}")
         return task
+
+    def add_generic_task(self, task_type: str, payload: dict, chat_id: int, batch_id: Optional[str] = None):
+        """
+        Adds a generic task (search, image, wordpress, etc.) to the store.
+        """
+        task: Dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "type": task_type,
+            "batch_id": batch_id,
+            "payload": payload,
+            "chat_id": chat_id,
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.tasks.append(task)
+        self._save()
+        logger.info(f"Added generic task: {task_type} in batch {batch_id}")
+        return task
+
+    def update_task_status(self, task_id: str, status: str, result: Any = None, error: Optional[str] = None):
+        """
+        Updates the status and optional result/error of a task.
+        """
+        for task in self.tasks:
+            if task["id"] == task_id:
+                task["status"] = status
+                if result is not None: task["result"] = result
+                if error is not None: task["error"] = error
+                task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save()
+                return True
+        return False
+
+    def get_tasks_by_batch(self, batch_id: str):
+        return [t for t in self.tasks if t.get("batch_id") == batch_id]
 
     def get_pending_tasks(self):
         return [t for t in self.tasks if t["status"] == "pending"]
 
     def complete_task(self, task_id):
-        for task in self.tasks:
-            if task["id"] == task_id:
-                task["status"] = "completed"
-                self._save()
-                return True
-        return False
+        return self.update_task_status(task_id, "completed")
 
     def delete_task(self, task_id):
         self.tasks = [t for t in self.tasks if t["id"] != task_id]
         self._save()
 
     # --- Download Queue Methods ---
-    def add_download_request(self, chat_id: int, url: str = None):
-        task = {
+    def add_download_request(self, chat_id: int, url: Optional[str] = None, batch_id: Optional[str] = None):
+        task: Dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "type": "download_req",
+            "batch_id": batch_id,
             "chat_id": chat_id,
             "url": url,
             "status": "pending",
@@ -81,8 +116,10 @@ class TaskStore:
         }
         self.tasks.append(task)
         self._save()
-        logger.info(f"Added download request for chat_id: {chat_id}, url: {url}")
+        logger.info(f"Added download request for chat_id: {chat_id}, batch: {batch_id}")
         return task
+
+
 
     def get_next_download_request(self):
         """
