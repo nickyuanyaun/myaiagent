@@ -45,10 +45,18 @@ class QwenBrain:
                      "action": "draw" 
                 }},
                 {{
+                    "type": "translation",
+                    "source_url": "https://example.com/article",
+                    "target_language": "中文",
+                    "instructions": "翻译这篇文章"
+                }},
+                {{
                     "type": "wordpress_post",
                     "topic": "The future of AI Agents",
                     "instructions": "Write a professional article...",
-                    "image_prompt": "A futuristic robot working on a laptop"
+                    "image_prompt": "A futuristic robot working on a laptop",
+                    "source_content": "prior_tasks",
+                    "category": "科技"
                 }},
                 {{
                     "type": "reminder",
@@ -86,10 +94,26 @@ class QwenBrain:
            
         5. **download**:
            - If user provides a video URL to save/download.
+
+        6. **translation**:
+           - Use when user asks to translate an external article or web page.
+           - 'source_url': The URL of the article to translate. Use web_search first to fetch the content.
+           - 'target_language': The target language (e.g. "中文", "English").
+           - 'instructions': Any specific translation instructions.
+           - IMPORTANT: If user wants to translate AND publish, create BOTH a web_search task (to fetch the article), a translation task, AND a wordpress_post task with "source_content": "prior_tasks".
+
+        7. **wordpress_post**:
+           - Publish a blog post to WordPress.
+           - 'topic': The blog topic.
+           - 'instructions': Writing instructions.
+           - 'image_prompt': Prompt for generating blog images.
+           - 'source_content': Set to "prior_tasks" if the blog content should come from earlier task results (e.g. a translation). If omitted or empty, content will be generated from scratch.
+           - 'category': Category name if user specifies one (e.g. "科技", "生活", "教育"). If user doesn't specify, omit this field.
+           - CRITICAL: When user asks to translate an article and publish it as a blog, you MUST set "source_content": "prior_tasks" so the WordPress handler uses the translated content instead of generating new content.
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
-        - Sort tasks logically (e.g. search before reminding).
+        - Sort tasks logically: web_search → translation → image_generation → wordpress_post.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """
         

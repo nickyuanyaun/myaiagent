@@ -54,98 +54,91 @@ class MemoryStore:
         self._save()
         logger.info(f"Saved memory: {text}")
 
-    def search_memory(self, query: str, user_id=None, n_results=5):
+    def search_memory(self, query: str, user_id=None, n_results=10):
         """
-        Naive search: Returns all memories for a specific user. 
-        We rely on QwenBrain to filter them or we implement a simple keyword match here.
+        Search memories with improved Chinese support and cross-user access.
+        Same-user memories get a score boost, but all memories are searchable.
+        Always includes recent memories for broader context.
         """
-        # Simple Keyword Match (Enhanced for Chinese)
-        is_chinese = False
-        if len(query) > 0 and ' ' not in query:
-             # Heuristic: if no spaces, likely CJK or single word.
-             # Check for CJK range (optional but simple check is okay)
-             for char in query:
-                 if '\u4e00' <= char <= '\u9fff':
-                     is_chinese = True
-                     break
+        if not self.memories:
+            return []
+        
+        # Detect Chinese text
+        is_chinese = any('\u4e00' <= c <= '\u9fff' for c in query)
         
         scored = []
+        current_uid_str = str(user_id) if user_id else None
         
-        # Filter by user_id first
-        relevant_memories = []
-        if user_id:
-             current_uid_str = str(user_id)
-             for mem in self.memories:
-                 if not isinstance(mem, dict): continue
-                 # Check if metadata exists and matches
-                 meta = mem.get('metadata', {})
-                 if not isinstance(meta, dict): continue
-                 
-                 # Comparison: handle both int and str in storage
-                 stored_uid = meta.get('user_id')
-                 if stored_uid is not None and str(stored_uid) == current_uid_str:
-                      relevant_memories.append(mem)
-             
-             logger.info(f"SEARCH DEBUG: User {user_id} | Total Mem: {len(self.memories)} | Match: {len(relevant_memories)}")
-        else:
-             relevant_memories = [m for m in self.memories if isinstance(m, dict)]
-             logger.warning("SEARCH DEBUG: No user_id provided! Searching ALL memories.")
-        
-        # Identity Heuristic: If query asks "who am I" etc, prioritize identity facts
-        identity_keywords = ["谁", "名字", "who", "name", "identity", "记忆"]
-        is_identity_query = any(k in query.lower() for k in identity_keywords)
-
-        for mem in relevant_memories:
-            score = 0
+        for mem in self.memories:
+            if not isinstance(mem, dict): continue
             text_val = mem.get('text', '')
-            if not isinstance(text_val, str): continue
+            if not isinstance(text_val, str) or not text_val: continue
             content = text_val.lower()
+            query_lower = query.lower()
+            score = 0
             
+            # --- Keyword Matching ---
             if is_chinese:
-                q_chars = set(query)
-                c_chars = set(content)
-                overlap = len(q_chars.intersection(c_chars))
-                if overlap > 0:
-                    score = overlap
+                # Direct substring match (most important for Chinese)
+                if query_lower in content:
+                    score += 20
+                
+                # Bigram matching for Chinese characters
+                q_chars = [c for c in query if '\u4e00' <= c <= '\u9fff']
+                c_chars_set = set(content)
+                
+                # Single char overlap
+                char_overlap = sum(1 for c in q_chars if c in c_chars_set)
+                if char_overlap > 0:
+                    score += char_overlap * 2
+                
+                # Bigram matching (pairs of adjacent chars)
+                if len(q_chars) >= 2:
+                    q_bigrams = set(q_chars[i] + q_chars[i+1] for i in range(len(q_chars)-1))
+                    c_text = ''.join(c for c in content if '\u4e00' <= c <= '\u9fff')
+                    c_bigrams = set(c_text[i] + c_text[i+1] for i in range(len(c_text)-1)) if len(c_text) >= 2 else set()
+                    bigram_overlap = len(q_bigrams.intersection(c_bigrams))
+                    score += bigram_overlap * 3
             else:
-                keywords = query.lower().split()
+                # English word matching
+                keywords = query_lower.split()
                 for kw in keywords:
-                    if kw in content:
-                        score += 5 # Higher weight for word match
+                    if len(kw) > 2 and kw in content:
+                        score += 5
             
-            # Identity Bonus
-            if is_identity_query:
-                 if any(k in content for k in ["name is", "名字是", "我是", "昵称", "id是"]):
-                      score += 10
+            # --- Identity Bonus ---
+            identity_keywords = ["谁", "名字", "who", "name", "我是", "你是", "叫什么", "记得", "记忆", "宠物", "狗"]
+            if any(k in query_lower for k in identity_keywords):
+                identity_content_keys = ["name is", "名字是", "我是", "昵称", "叫做", "宠物", "pet", "dog", "狗", "金毛", "马尔泰"]
+                if any(k in content for k in identity_content_keys):
+                    score += 15
+            
+            # --- Same-User Boost (not filter) ---
+            if current_uid_str:
+                meta = mem.get('metadata', {})
+                if isinstance(meta, dict):
+                    stored_uid = meta.get('user_id')
+                    if stored_uid is not None and str(stored_uid) == current_uid_str:
+                        score += 3  # Boost, not required
             
             if score > 0:
                 scored.append((score, text_val))
         
         scored.sort(key=lambda x: x[0], reverse=True)
         
-        # If no keywords match, or for identity queries, return a broader window
-        if not scored or is_identity_query:
-             # Mix of Identity facts and Most Recent
-             results = []
-             if is_identity_query:
-                  # Find memories that look like profile facts
-                  for m in relevant_memories:
-                       txt = m.get('text', '')
-                       if any(k in txt.lower() for k in ["name is", "名字是", "我是", "昵称", "id是"]):
-                            results.append(txt)
-                  results = results[:5]
-             
-             # Fill/Add most recent
-             recent = [m.get('text', '') for m in relevant_memories if isinstance(m, dict)]
-             recent.reverse() # Newest first
-             for r in recent:
-                  if r and r not in results:
-                       results.append(r)
-                  if len(results) >= 20: break
-             
-             return results
+        # Get top scored results
+        results = [s[1] for s in scored[:n_results]]
         
-        return [s[1] for s in scored[:n_results]]
+        # Always include recent memories for broader context
+        recent = [m.get('text', '') for m in reversed(self.memories) if isinstance(m, dict)]
+        for r in recent:
+            if r and r not in results:
+                results.append(r)
+            if len(results) >= 20:
+                break
+        
+        logger.info(f"SEARCH: query='{query}' | scored={len(scored)} | returning={len(results)}")
+        return results
 
 if __name__ == "__main__":
     ms = MemoryStore("data/test_mem.json")

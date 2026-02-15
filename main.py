@@ -269,6 +269,53 @@ def search_web(query, time_limit=None):
         logger.error(f"Search error: {e}")
         return f"Error during search: {e}"
 
+def fetch_url_content(url):
+    """Fetch and extract the main text content from a URL."""
+    logger.info(f"Fetching full article content from: {url}")
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        html = response.text
+        
+        # Basic HTML to text extraction
+        # Remove script and style elements
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Convert common block elements to newlines
+        html = re.sub(r'<br\s*/?\s*>', '\n', html, flags=re.IGNORECASE)
+        html = re.sub(r'</(p|div|h[1-6]|li|tr|blockquote)>', '\n\n', html, flags=re.IGNORECASE)
+        
+        # Remove all remaining HTML tags
+        text = re.sub(r'<[^>]+>', '', html)
+        
+        # Decode HTML entities
+        import html as html_module
+        text = html_module.unescape(text)
+        
+        # Clean up whitespace
+        lines = [line.strip() for line in text.splitlines()]
+        lines = [line for line in lines if len(line) > 20]  # Filter short noise lines
+        text = '\n\n'.join(lines)
+        
+        # Limit to reasonable length (first ~8000 chars to stay within model context)
+        if len(text) > 8000:
+            text = text[:8000] + "\n\n[... article truncated ...]"
+        
+        logger.info(f"Fetched {len(text)} chars of article content from {url}")
+        return text
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch URL content: {e}")
+        return f"Error fetching URL: {e}"
+
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
     """Refactored callback for reminders."""
     job = context.job
@@ -507,6 +554,7 @@ async def update_agenda_msg(context, chat_id, agenda_msg_id, batch_id):
         if task_type == "web_search": detail = f": _{payload.get('query', '')}_"
         elif task_type == "image_generation": detail = f": _{payload.get('prompt', '')[:30]}..._"
         elif task_type == "wordpress_post": detail = f": _{payload.get('topic', '')}_"
+        elif task_type == "translation": detail = f": _{payload.get('target_language', '翻译')}_"
         elif task_type == "reminder": detail = f": _{task.get('content', '')}_"
         
         agenda_text += f"{icon} {display_name}{detail}\n"
@@ -537,23 +585,31 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     retrieved_docs = []
     if memory_store:
         candidates = memory_store.search_memory(user_input, user_id=update.effective_user.id, n_results=10)
-        if qwen_brain and candidates:
-            try:
-                retrieved_docs = await asyncio.to_thread(qwen_brain.filter_memories, user_input, candidates)
-                logger.info(f"Memory Filter: {len(candidates)} -> {len(retrieved_docs)}")
-                # FALLBACK: If filter returns nothing but candidates exist, use top 5
-                if candidates and not retrieved_docs:
-                     logger.warning("DeepSeek filter returned 0 results. Using top 5 candidates as fallback.")
-                     retrieved_docs = candidates[:5]
-            except Exception as e:
-                logger.error(f"Filter failed, using top 5: {e}")
+        if candidates:
+            # Skip expensive DeepSeek filter for small candidate sets — just use them all
+            if len(candidates) <= 10:
+                retrieved_docs = candidates
+                logger.info(f"Memory: Using all {len(candidates)} candidates directly (small set, skip filter)")
+            elif qwen_brain:
+                try:
+                    retrieved_docs = await asyncio.to_thread(qwen_brain.filter_memories, user_input, candidates)
+                    logger.info(f"Memory Filter: {len(candidates)} -> {len(retrieved_docs)}")
+                    # FALLBACK: If filter returns nothing but candidates exist, use top 10
+                    if not retrieved_docs:
+                         logger.warning("DeepSeek filter returned 0 results. Using top 10 candidates as fallback.")
+                         retrieved_docs = candidates[:10]
+                except Exception as e:
+                    logger.error(f"Filter failed, using top 10: {e}")
+                    retrieved_docs = candidates[:10]
+            else:
                 retrieved_docs = candidates[:5]
-        else:
-            retrieved_docs = candidates[:3]
 
     memory_context = ""
-    if qwen_brain:
-        memory_context = qwen_brain.synthesize_context(retrieved_docs)
+    if retrieved_docs:
+        memory_context = "\n".join([f"- {m}" for m in retrieved_docs])
+        logger.info(f"Memory Context Injected: {len(retrieved_docs)} items, {len(memory_context)} chars")
+    else:
+        logger.info("Memory Context: EMPTY (no relevant memories found)")
 
     # 3. Analyze Message with Qwen
     # analysis is now a dictionary containing a LIST of tasks
@@ -706,6 +762,81 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                          success = False
                          error_msg = str(e)
     
+            # --- Translation ---
+            elif task_type == "translation":
+                try:
+                    source_url = task_payload.get("source_url", "")
+                    target_language = task_payload.get("target_language", "中文")
+                    t_instructions = task_payload.get("instructions", "")
+                    
+                    # PRIORITY 1: Fetch full article content directly from URL
+                    source_material = ""
+                    if source_url:
+                        await context.bot.send_message(chat_id=chat_id, text=f"📄 正在获取原文内容: {source_url}")
+                        fetched = await asyncio.to_thread(fetch_url_content, source_url)
+                        if fetched and not fetched.startswith("Error"):
+                            source_material = fetched
+                            logger.info(f"Successfully fetched full article: {len(source_material)} chars")
+                    
+                    # PRIORITY 2: If URL fetch failed, try to find URL from user message or search results
+                    if not source_material:
+                        # Check if there's a URL in the execution log from web_search
+                        for entry in execution_log:
+                            if "Search Results" in entry:
+                                # Extract URLs from search results
+                                import re as re_mod
+                                urls_found = re_mod.findall(r'Link:\s*(https?://\S+)', entry)
+                                if urls_found:
+                                    await context.bot.send_message(chat_id=chat_id, text=f"📄 从搜索结果获取原文...")
+                                    fetched = await asyncio.to_thread(fetch_url_content, urls_found[0])
+                                    if fetched and not fetched.startswith("Error"):
+                                        source_material = fetched
+                                        break
+                    
+                    # PRIORITY 3: Last resort - use search snippets (low quality)
+                    if not source_material:
+                        for entry in execution_log:
+                            if "Search Results" in entry:
+                                source_material += entry + "\n"
+                        if source_material:
+                            logger.warning("Using search snippets as translation source (lower quality)")
+                    
+                    if source_material:
+                        await context.bot.send_message(chat_id=chat_id, text=f"📝 正在翻译全文为{target_language}（共{len(source_material)}字符）...")
+                        
+                        translation_prompt = (
+                            f"Translate the following article content into {target_language}.\n"
+                            f"Instructions: {t_instructions}\n"
+                            f"CRITICAL RULES:\n"
+                            f"1. Produce a FAITHFUL, HIGH-QUALITY translation of the COMPLETE source article.\n"
+                            f"2. Do NOT summarize, condense, or rewrite. Translate EVERY paragraph.\n"
+                            f"3. Preserve the original article's structure, quotes, data points, and details.\n"
+                            f"4. Keep proper nouns, researcher names, institution names in their original form.\n\n"
+                            f"=== SOURCE ARTICLE START ===\n{source_material}\n=== SOURCE ARTICLE END ==="
+                        )
+                        
+                        trans_response = genai_client.models.generate_content(
+                            model=GEMINI_MODEL_NAME,
+                            contents=[translation_prompt],
+                            config=types.GenerateContentConfig(temperature=0.2)
+                        )
+                        
+                        translated_text = trans_response.text
+                        if translated_text:
+                            execution_log.append(f"[Translation Result]\n{translated_text}")
+                            logger.info(f"Translation completed: {len(translated_text)} chars")
+                        else:
+                            raise Exception("Translation returned empty result")
+                    else:
+                        success = False
+                        error_msg = "No source material found for translation"
+                        
+                except Exception as e:
+                    logger.error(f"Translation Failed: {e}")
+                    success = False
+                    error_msg = str(e)
+                    execution_log.append(f"[System] Translation failed: {e}")
+
             # --- WordPress Post ---
             elif task_type == "wordpress_post":
                 try:
@@ -713,6 +844,25 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     instructions = task_payload.get("instructions", "")
                     image_count = task_payload.get("image_count", 3)
                     image_prompt = task_payload.get("image_prompt", f"A banner image about {topic}")
+                    source_content = task_payload.get("source_content", "")
+                    
+                    # === CONTENT PIPELINE FIX ===
+                    # Check if we should use prior task outputs instead of generating from scratch
+                    prior_content = ""
+                    if source_content == "prior_tasks":
+                        # Collect translated content and search results from execution_log
+                        for entry in execution_log:
+                            if entry.startswith("[Translation Result]"):
+                                prior_content += entry.replace("[Translation Result]", "").strip() + "\n\n"
+                            elif "Search Results" in entry:
+                                prior_content += entry + "\n\n"
+                        
+                        if prior_content:
+                            logger.info(f"Using prior task content for WordPress post ({len(prior_content)} chars)")
+                            # Also derive image prompt from actual content instead of vague topic
+                            image_prompt = f"Professional blog illustration related to: {prior_content[:200]}"
+                        else:
+                            logger.warning("source_content='prior_tasks' but no prior content found in execution_log. Falling back to generation.")
                     
                     # 1. Generate Images in a loop to ensure distinct results and correct count
                     image_urls = []
@@ -768,24 +918,58 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     if not image_urls:
                         raise Exception("Failed to generate or upload any images for the blog post.")
 
-                    # 2. Generate Content with Image URLs embedded (FORCEFUL & EXCLUSIVE PROMPT)
-                    blog_system_prompt = (
-                        "You are an expert tech blogger. "
-                        "Output exclusively in JSON format: {'title': '...', 'content': 'HTML body'}. "
-                        "The 'content' must be high-quality HTML. "
-                        "COMMAND: You MUST embed the provided image URLs at logical break points. "
-                        "STRICT RULE: Only use the exactly provided URLs (IMAGE_URL_X). "
-                        "DO NOT use any other URLs, placeholders, or external links for images. "
-                        "Format each image as: <figure><img src='URL' style='width:100%; height:auto;'/><figcaption>Descriptive caption</figcaption></figure>"
+                    # 2. Generate Content — USE PRIOR CONTENT if available, else generate from scratch
+                    urls_list_str = "\n".join([f"- IMAGE_URL_{i+1}: {url}" for i, url in enumerate(image_urls)])
+                    
+                    gutenberg_image_instruction = (
+                        "For images, use Gutenberg block format:\n"
+                        "<!-- wp:image {\"sizeSlug\":\"large\"} -->\n"
+                        "<figure class=\"wp-block-image size-large\"><img src=\"URL\" alt=\"description\"/>"
+                        "<figcaption>caption</figcaption></figure>\n"
+                        "<!-- /wp:image -->\n"
+                    )
+                    gutenberg_format_instruction = (
+                        "CRITICAL FORMAT RULES:\n"
+                        "1. Output the 'content' field in WordPress Gutenberg BLOCK format, NOT raw HTML.\n"
+                        "2. Wrap each paragraph in: <!-- wp:paragraph --><p>text</p><!-- /wp:paragraph -->\n"
+                        "3. Wrap each heading in: <!-- wp:heading --><h2>text</h2><!-- /wp:heading -->\n"
+                        f"4. {gutenberg_image_instruction}"
+                        "5. You MUST embed ALL provided image URLs at logical break points.\n"
+                        "6. STRICT: Only use the provided IMAGE_URL_X links. Do NOT invent URLs.\n"
+                    )
+                    tags_instruction = (
+                        "Also generate 5-8 relevant tags for SEO. Include both Chinese and English tags if appropriate.\n"
                     )
                     
-                    urls_list_str = "\n".join([f"- IMAGE_URL_{i+1}: {url}" for i, url in enumerate(image_urls)])
-                    blog_user_prompt = (
-                        f"Topic: {topic}\n"
-                        f"Instructions: {instructions}\n\n"
-                        f"Available Images (Embed ALL of these in order):\n{urls_list_str}\n\n"
-                        f"IMPORTANT: Use ONLY the URLs above. Write a comprehensive HTML blog post."
-                    )
+                    if prior_content:
+                        # === USE PRIOR CONTENT (translation / search results) ===
+                        blog_system_prompt = (
+                            "You are an expert blog formatter. "
+                            "Output exclusively in JSON format: {\"title\": \"...\", \"content\": \"Gutenberg block content\", \"tags\": [\"tag1\", \"tag2\", ...]}. "
+                            "COMMAND: Take the provided translated article content and format it as a WordPress Gutenberg block blog post. "
+                            "DO NOT rewrite, summarize, or change the meaning. Keep the translation faithful. "
+                            + gutenberg_format_instruction + tags_instruction
+                        )
+                        blog_user_prompt = (
+                            f"Here is the translated article content to format as a blog post:\n\n"
+                            f"{prior_content}\n\n"
+                            f"Available Images (Embed ALL of these in order):\n{urls_list_str}\n\n"
+                            f"Format this content as a Gutenberg block blog post. Keep the translation intact. Use ONLY the URLs above for images."
+                        )
+                    else:
+                        # === FALLBACK: Generate from scratch ===
+                        blog_system_prompt = (
+                            "You are an expert tech blogger. "
+                            "Output exclusively in JSON format: {\"title\": \"...\", \"content\": \"Gutenberg block content\", \"tags\": [\"tag1\", \"tag2\", ...]}. "
+                            "The 'content' must be high-quality WordPress Gutenberg block format. "
+                            + gutenberg_format_instruction + tags_instruction
+                        )
+                        blog_user_prompt = (
+                            f"Topic: {topic}\n"
+                            f"Instructions: {instructions}\n\n"
+                            f"Available Images (Embed ALL of these in order):\n{urls_list_str}\n\n"
+                            f"IMPORTANT: Use ONLY the URLs above. Write a comprehensive Gutenberg block blog post."
+                        )
     
                     blog_response = genai_client.models.generate_content(
                         model=GEMINI_MODEL_NAME,
@@ -796,13 +980,39 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     blog_data = json.loads(blog_response.text)
                     title = blog_data.get("title", topic)
                     content = blog_data.get("content", "")
+                    auto_tags = blog_data.get("tags", [])
+
     
-                    # 3. Create the Post
+                    # 3. Resolve Tags and Categories to WordPress IDs
+                    tag_ids = []
+                    if auto_tags and isinstance(auto_tags, list):
+                        await context.bot.send_message(chat_id=chat_id, text=f"🏷️ 正在创建标签: {', '.join(auto_tags[:8])}")
+                        for tag_name in auto_tags[:8]:
+                            tag_id = await asyncio.to_thread(wp.get_or_create_tag, str(tag_name))
+                            if tag_id:
+                                tag_ids.append(tag_id)
+                    
+                    category_ids = []
+                    user_category = task_payload.get("category", "")
+                    if user_category:
+                        cat_id = await asyncio.to_thread(wp.get_or_create_category, user_category)
+                        if cat_id:
+                            category_ids.append(cat_id)
+
+                    # 4. Create the Post
                     featured_id = media_ids[0] if media_ids else None
-                    post_data = await asyncio.to_thread(wp.create_post, title, content, status='publish', featured_media_id=featured_id)
+                    post_data = await asyncio.to_thread(
+                        wp.create_post, title, content, 
+                        status='publish', 
+                        categories=category_ids if category_ids else None,
+                        tags=tag_ids if tag_ids else None,
+                        featured_media_id=featured_id
+                    )
                     
                     link = post_data.get('link')
-                    await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功（包含 {len(image_urls)} 张图片）！\n🔗 {link}")
+                    tag_info = f"，标签: {', '.join(auto_tags[:5])}" if auto_tags else ""
+                    cat_info = f"，分类: {user_category}" if user_category else ""
+                    await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功（包含 {len(image_urls)} 张图片{tag_info}{cat_info}）！\n🔗 {link}")
                     execution_log.append(f"[System] Published multimedia blog post with {len(image_urls)} images: {link}")
 
                     import shutil
@@ -829,7 +1039,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     # --- Phase 3: Gemini Final Response ---
     try:
         MAX_CONTEXT_MESSAGES = 10
-        m_ctx = analysis.get("memory_context") or ""
+        m_ctx = memory_context  # Use the variable computed in Phase 2 (NOT analysis dict)
         final_system_context = str(m_ctx) + "\n\n[RECENT ACTIONS LOG]:\n" + "\n".join(execution_log)
         sys_instruct = get_system_prompt(final_system_context)
         
