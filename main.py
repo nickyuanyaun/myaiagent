@@ -29,6 +29,7 @@ from task_store import TaskStore
 from metube_client import MeTubeClient
 from wordpress_client import WordPressClient
 from file_watcher import FileWatcher
+from blog_media_store import BlogMediaStore
 
 # 1. Load Configuration
 load_dotenv()
@@ -47,6 +48,7 @@ qwen_brain = None
 task_store = None
 metube_client = None
 file_watcher = None
+blog_media_store = None
 
 # 2. Logging
 logging.basicConfig(
@@ -199,6 +201,7 @@ qwen_brain = None
 task_store = None
 metube_client = None
 file_watcher = None
+blog_media_store = None
 
 # 4. Helper Functions
 def get_system_prompt(memories=""):
@@ -578,6 +581,26 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     batch_id = str(uuid.uuid4())
     agenda_msg_id = None
     
+    # --- Phase 0: Check if user is confirming media cleanup ---
+    if context.user_data.get('pending_media_cleanup'):
+        lower_input = user_input.strip().lower()
+        confirm_words = ['可以', '是', '好', '删除', '删', 'yes', 'ok', 'sure', '确认', '对', '好的', '嗯']
+        deny_words = ['不', '别', '不要', 'no', '取消', '保留', '暂时不']
+        
+        if any(w in lower_input for w in confirm_words):
+            if blog_media_store:
+                deleted = blog_media_store.delete_published(chat_id)
+                await context.bot.send_message(chat_id=chat_id, text=f"🗑️ 已删除 {deleted} 个本地博客素材文件。")
+            context.user_data['pending_media_cleanup'] = False
+            return
+        elif any(w in lower_input for w in deny_words):
+            await context.bot.send_message(chat_id=chat_id, text="👌 好的，本地素材暂时保留。")
+            context.user_data['pending_media_cleanup'] = False
+            return
+        else:
+            # Not a clear answer, clear the flag and proceed normally
+            context.user_data['pending_media_cleanup'] = False
+    
     # --- Phase 1: Qwen Analysis (Parallel / Background) ---
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
@@ -668,8 +691,32 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
         error_msg = None
         
         try:
+            # --- Blog Media Save ---
+            if task_type == "blog_media_save":
+                if blog_media_store:
+                    saved_count = 0
+                    # Save the primary image
+                    if image_b64:
+                        img_bytes = base64.b64decode(image_b64)
+                        mid = blog_media_store.add_media(img_bytes, f"blog_photo_{int(time.time())}.jpg", chat_id, caption=user_input)
+                        saved_count += 1
+                    # Save additional images (from media group)
+                    if additional_images:
+                        for idx, b64 in enumerate(additional_images):
+                            img_bytes = base64.b64decode(b64)
+                            mid = blog_media_store.add_media(img_bytes, f"blog_photo_{int(time.time())}_{idx}.jpg", chat_id, caption=user_input)
+                            saved_count += 1
+                    
+                    total = blog_media_store.get_media_count(chat_id)
+                    if saved_count > 0:
+                        await context.bot.send_message(chat_id=chat_id, text=f"📎 已保存 {saved_count} 张图片作为博客素材（当前共 {total} 张待用）")
+                        execution_log.append(f"[System] Saved {saved_count} blog media images (total: {total})")
+                    else:
+                        await context.bot.send_message(chat_id=chat_id, text="⚠️ 没有检测到图片，请在发送图片时附上'博客素材'等说明。")
+                        execution_log.append("[System] blog_media_save triggered but no images found")
+
             # --- Memory Save ---
-            if task_type == "memory_save":
+            elif task_type == "memory_save":
                 content = task_payload.get("content")
                 if memory_store and content:
                     await asyncio.to_thread(memory_store.add_memory, content, {"source": "user_chat", "user_id": update.effective_user.id})
@@ -845,6 +892,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     image_count = task_payload.get("image_count", 3)
                     image_prompt = task_payload.get("image_prompt", f"A banner image about {topic}")
                     source_content = task_payload.get("source_content", "")
+                    use_uploaded_media = task_payload.get("use_uploaded_media", False)
                     
                     # === CONTENT PIPELINE FIX ===
                     # Check if we should use prior task outputs instead of generating from scratch
@@ -864,7 +912,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         else:
                             logger.warning("source_content='prior_tasks' but no prior content found in execution_log. Falling back to generation.")
                     
-                    # 1. Generate Images in a loop to ensure distinct results and correct count
+                    # 1. Prepare Images
                     image_urls = []
                     media_ids = []
                     task_subdir = os.path.join("workspace", "task_assets", f"wp_{int(time.time())}")
@@ -875,11 +923,41 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     wp_url = os.getenv("WP_BASE_URL", "")
                     wp = WordPressClient(wp_url, wp_user, wp_password)
 
+                    # --- 1a. Upload user's pre-saved blog media ---
+                    uploaded_user_media = False
+                    if use_uploaded_media and blog_media_store:
+                        pending_media = blog_media_store.get_pending_media(chat_id)
+                        if pending_media:
+                            await context.bot.send_message(chat_id=chat_id, text=f"📤 正在上传 {len(pending_media)} 张用户素材到博客...")
+                            for idx, media_entry in enumerate(pending_media):
+                                try:
+                                    img_bytes = blog_media_store.get_media_bytes(media_entry["id"])
+                                    if img_bytes:
+                                        fname = media_entry.get("original_filename", f"user_media_{idx}.jpg")
+                                        upload_id = await asyncio.to_thread(wp.upload_media, img_bytes, fname)
+                                        media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
+                                        img_url = media_info.get("source_url")
+                                        if img_url:
+                                            image_urls.append(img_url)
+                                            media_ids.append(upload_id)
+                                            logger.info(f"Uploaded user blog media {idx+1}: {img_url}")
+                                except Exception as e:
+                                    logger.error(f"Failed to upload user media {media_entry['id']}: {e}")
+                            
+                            uploaded_user_media = len(image_urls) > 0
+                            if uploaded_user_media:
+                                # Reduce AI-generated image count since user provided their own
+                                image_count = max(0, image_count - len(image_urls))
+                                logger.info(f"User media uploaded: {len(image_urls)} images. Remaining AI images to generate: {image_count}")
+                        else:
+                            logger.info("use_uploaded_media=True but no pending media found.")
+
+                    # --- 1b. Generate AI images (if still needed) ---
                     for i in range(image_count):
                         logger.info(f"Generating image {i+1}/{image_count} for blog topic: {topic}")
                         try:
                             # 1.5 Rate Limit Optimization: Add a small sleep between sequential calls
-                            if i > 0:
+                            if i > 0 or uploaded_user_media:
                                 sleep_time = 5 # 5 seconds delay is safe for 20 RPM
                                 logger.info(f"Rate limit pacing: Sleeping for {sleep_time}s before next request...")
                                 await asyncio.sleep(sleep_time)
@@ -908,7 +986,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                 if img_url:
                                     image_urls.append(img_url)
                                     media_ids.append(upload_id)
-                                    logger.info(f"Successfully uploaded and retrieved URL for Image {i+1}: {img_url}")
+                                    logger.info(f"Successfully uploaded and retrieved URL for AI Image {i+1}: {img_url}")
                             else:
                                 logger.warning(f"Failed to generate image {i+1}: No bytes returned.")
                         except Exception as e:
@@ -1019,6 +1097,16 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     shutil.rmtree(task_subdir)
                     logger.info(f"Cleaned up temporary assets: {task_subdir}")
 
+                    # --- Mark uploaded media as published & ask about cleanup ---
+                    if uploaded_user_media and blog_media_store:
+                        published_count = blog_media_store.mark_published(chat_id)
+                        if published_count > 0:
+                            context.user_data['pending_media_cleanup'] = True
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=f"📁 博客已成功发布，本地暂存的 {published_count} 个素材文件是否可以删除？\n回复'可以'删除，或'保留'暂不删除。"
+                            )
+
                 except Exception as e:
                     logger.error(f"WP Task Failed: {e}")
                     success = False
@@ -1110,6 +1198,8 @@ if __name__ == '__main__':
         qwen_brain = QwenBrain() # Assumes Ollama is running
         print("Initializing Task Store...")
         task_store = TaskStore()
+        print("Initializing Blog Media Store...")
+        blog_media_store = BlogMediaStore()
         print("Initializing MeTube Client...")
         metube_client = MeTubeClient()
         print("Initializing File Watcher...")

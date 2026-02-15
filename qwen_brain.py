@@ -51,12 +51,16 @@ class QwenBrain:
                     "instructions": "翻译这篇文章"
                 }},
                 {{
+                    "type": "blog_media_save"
+                }},
+                {{
                     "type": "wordpress_post",
                     "topic": "The future of AI Agents",
                     "instructions": "Write a professional article...",
                     "image_prompt": "A futuristic robot working on a laptop",
                     "source_content": "prior_tasks",
-                    "category": "科技"
+                    "category": "科技",
+                    "use_uploaded_media": true
                 }},
                 {{
                     "type": "reminder",
@@ -109,11 +113,19 @@ class QwenBrain:
            - 'image_prompt': Prompt for generating blog images.
            - 'source_content': Set to "prior_tasks" if the blog content should come from earlier task results (e.g. a translation). If omitted or empty, content will be generated from scratch.
            - 'category': Category name if user specifies one (e.g. "科技", "生活", "教育"). If user doesn't specify, omit this field.
+           - 'use_uploaded_media': Set to true if user has previously uploaded blog media images and wants to use them in the post. When true, uploaded images will be used instead of generating new ones.
            - CRITICAL: When user asks to translate an article and publish it as a blog, you MUST set "source_content": "prior_tasks" so the WordPress handler uses the translated content instead of generating new content.
+
+        8. **blog_media_save**:
+           - Use when user sends image(s) and explicitly says they are for a blog post.
+           - Keywords: "博客用", "用于博客", "博客素材", "blog media", "for my blog", "博客图片"
+           - Return: {{"type": "blog_media_save"}}
+           - NOTE: This only marks intent. The photo handler saves the actual images.
+           - If user says to use uploaded images for blog, set use_uploaded_media=true in the wordpress_post task.
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
-        - Sort tasks logically: web_search → translation → image_generation → wordpress_post.
+        - Sort tasks logically: blog_media_save → web_search → translation → image_generation → wordpress_post.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """
         
