@@ -1022,7 +1022,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     if effective_use_uploaded and blog_media_store:
                         pending_media = blog_media_store.get_pending_media(chat_id)
                         if pending_media:
-                            await context.bot.send_message(chat_id=chat_id, text=f"\ud83d\udce4 \u6b63\u5728\u4e0a\u4f20 {len(pending_media)} \u5f20\u7528\u6237\u7d20\u6750\u5230\u535a\u5ba2...")
+                            await context.bot.send_message(chat_id=chat_id, text=f"[Upload] 正在上传 {len(pending_media)} 张用户素材到博客...")
                             for idx, media_entry in enumerate(pending_media):
                                 try:
                                     img_bytes = blog_media_store.get_media_bytes(media_entry["id"])
