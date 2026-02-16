@@ -131,10 +131,15 @@ class QwenBrain:
            - Return: {{"type": "blog_media_save"}}
            - NOTE: This only marks intent. The photo handler saves the actual images.
            - MUST appear BEFORE wordpress_post in the task list.
+
+        9. **blog_media_clear**:
+           - Use when user wants to clear/delete/reset all pending blog media images.
+           - Keywords: "清空素材", "删除素材", "清空博客素材", "删除博客图片", "重置素材", "clear media", "reset blog media"
+           - Return: {{"type": "blog_media_clear"}}
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
-        - Sort tasks logically: blog_media_save → web_search → translation → image_generation → wordpress_post.
+        - Sort tasks logically: blog_media_save -> web_search -> translation -> image_generation -> wordpress_post.
         - NEVER create an image_generation task when user says to use their uploaded images for the blog post. The image_generation task is for standalone image requests, NOT for blog images.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """

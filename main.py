@@ -728,6 +728,18 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         await context.bot.send_message(chat_id=chat_id, text="⚠️ 没有检测到图片，请在发送图片时附上'博客素材'等说明。")
                         execution_log.append("[System] blog_media_save triggered but no images found")
 
+            # --- Blog Media Clear ---
+            elif task_type == "blog_media_clear":
+                if blog_media_store:
+                    pending_count = blog_media_store.get_media_count(chat_id)
+                    if pending_count > 0:
+                        cleared = blog_media_store.clear_pending(chat_id)
+                        await context.bot.send_message(chat_id=chat_id, text=f"已清空 {cleared} 张暂存博客素材。")
+                        execution_log.append(f"[System] Cleared {cleared} pending blog media images")
+                    else:
+                        await context.bot.send_message(chat_id=chat_id, text="当前没有暂存的博客素材。")
+                        execution_log.append("[System] No pending blog media to clear")
+
             # --- Memory Save ---
             elif task_type == "memory_save":
                 content = task_payload.get("content")

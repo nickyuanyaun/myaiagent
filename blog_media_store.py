@@ -116,6 +116,27 @@ class BlogMediaStore:
             logger.info(f"Marked {count} media items as published for chat {chat_id}")
         return count
 
+    def clear_pending(self, chat_id: int) -> int:
+        """Delete all pending (not yet published) media files and remove their metadata entries."""
+        to_delete = [e for e in self.entries if e["chat_id"] == chat_id and e["status"] == "pending"]
+        deleted_count = 0
+
+        for entry in to_delete:
+            filepath = entry.get("filepath", "")
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    logger.info(f"Deleted pending media file: {filepath}")
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete pending media file {filepath}: {e}")
+
+        # Remove entries from metadata
+        self.entries = [e for e in self.entries if not (e["chat_id"] == chat_id and e["status"] == "pending")]
+        self._save()
+        logger.info(f"Cleared {deleted_count} pending media items for chat {chat_id}")
+        return deleted_count
+
     def delete_published(self, chat_id: int) -> int:
         """Delete all published media files and remove their metadata entries."""
         to_delete = [e for e in self.entries if e["chat_id"] == chat_id and e["status"] == "published"]
