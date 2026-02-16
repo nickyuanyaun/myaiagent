@@ -58,9 +58,10 @@ class QwenBrain:
                     "topic": "The future of AI Agents",
                     "instructions": "Write a professional article...",
                     "image_prompt": "A futuristic robot working on a laptop",
-                    "source_content": "prior_tasks",
+                    "source_content": "user_instructions",
                     "category": "科技",
-                    "use_uploaded_media": true
+                    "use_uploaded_media": true,
+                    "image_count": 0
                 }},
                 {{
                     "type": "reminder",
@@ -109,23 +110,32 @@ class QwenBrain:
         7. **wordpress_post**:
            - Publish a blog post to WordPress.
            - 'topic': The blog topic.
-           - 'instructions': Writing instructions.
-           - 'image_prompt': Prompt for generating blog images.
-           - 'source_content': Set to "prior_tasks" if the blog content should come from earlier task results (e.g. a translation). If omitted or empty, content will be generated from scratch.
+           - 'instructions': Writing instructions. CRITICAL: Copy the user's full instructions/requirements here so the blog generator can follow them.
+           - 'image_prompt': Prompt for generating AI blog images. Only needed when image_count > 0.
+           - 'source_content': 
+             - "prior_tasks" = use translated/searched content from earlier tasks
+             - "user_instructions" = use the user's own text/instructions as the basis for blog content (when user describes what to write, NOT translating)
+             - omit or "" = generate content from scratch based on topic
            - 'category': Category name if user specifies one (e.g. "科技", "生活", "教育"). If user doesn't specify, omit this field.
-           - 'use_uploaded_media': Set to true if user has previously uploaded blog media images and wants to use them in the post. When true, uploaded images will be used instead of generating new ones.
-           - CRITICAL: When user asks to translate an article and publish it as a blog, you MUST set "source_content": "prior_tasks" so the WordPress handler uses the translated content instead of generating new content.
+           - 'use_uploaded_media': Set to true if user has uploaded/saved blog media images and wants to use them in the post.
+           - 'image_count': Number of AI images to generate. CRITICAL RULES:
+             - When user says to use their uploaded photos AND says "不用生成图片"/"不要生成内容图片"/"只要缩略图", set image_count to 0 or 1.
+             - When use_uploaded_media is true, default image_count should be 1 (just a thumbnail/featured image) unless user says otherwise.
+             - When use_uploaded_media is false or omitted, default is 3.
+           - CRITICAL: When user asks to translate an article and publish it as a blog, you MUST set "source_content": "prior_tasks".
+           - CRITICAL: When user sends photos and says to write a blog using those photos, set use_uploaded_media=true AND do NOT create a separate image_generation task.
 
         8. **blog_media_save**:
-           - Use when user sends image(s) and explicitly says they are for a blog post.
-           - Keywords: "博客用", "用于博客", "博客素材", "blog media", "for my blog", "博客图片"
+           - Use when user sends image(s) and explicitly says they are for a blog post, OR when user sends images AND asks to create a blog post using them in the same message.
+           - Keywords: "博客用", "用于博客", "博客素材", "blog media", "for my blog", "博客图片", "发博客", "写博客"
            - Return: {{"type": "blog_media_save"}}
            - NOTE: This only marks intent. The photo handler saves the actual images.
-           - If user says to use uploaded images for blog, set use_uploaded_media=true in the wordpress_post task.
+           - MUST appear BEFORE wordpress_post in the task list.
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
         - Sort tasks logically: blog_media_save → web_search → translation → image_generation → wordpress_post.
+        - NEVER create an image_generation task when user says to use their uploaded images for the blog post. The image_generation task is for standalone image requests, NOT for blog images.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """
         

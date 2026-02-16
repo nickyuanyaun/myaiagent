@@ -889,14 +889,20 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                 try:
                     topic = task_payload.get("topic", "AI Update")
                     instructions = task_payload.get("instructions", "")
-                    image_count = task_payload.get("image_count", 3)
                     image_prompt = task_payload.get("image_prompt", f"A banner image about {topic}")
                     source_content = task_payload.get("source_content", "")
                     use_uploaded_media = task_payload.get("use_uploaded_media", False)
                     
-                    # === CONTENT PIPELINE FIX ===
-                    # Check if we should use prior task outputs instead of generating from scratch
+                    # --- CRITICAL FIX: Default image_count based on use_uploaded_media ---
+                    # When using uploaded media, default to 1 (just a featured/thumbnail image)
+                    # When Qwen explicitly sets image_count, use that value
+                    default_image_count = 1 if use_uploaded_media else 3
+                    image_count = task_payload.get("image_count", default_image_count)
+                    
+                    # === CONTENT PIPELINE ===
                     prior_content = ""
+                    user_writing_instructions = ""
+                    
                     if source_content == "prior_tasks":
                         # Collect translated content and search results from execution_log
                         for entry in execution_log:
@@ -907,10 +913,14 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         
                         if prior_content:
                             logger.info(f"Using prior task content for WordPress post ({len(prior_content)} chars)")
-                            # Also derive image prompt from actual content instead of vague topic
                             image_prompt = f"Professional blog illustration related to: {prior_content[:200]}"
                         else:
                             logger.warning("source_content='prior_tasks' but no prior content found in execution_log. Falling back to generation.")
+                    
+                    elif source_content == "user_instructions":
+                        # User provided their own writing instructions (e.g. "写一篇关于AI摄影的博客")
+                        user_writing_instructions = instructions
+                        logger.info(f"Using user_instructions for blog content: {user_writing_instructions[:100]}...")
                     
                     # 1. Prepare Images
                     image_urls = []
@@ -925,10 +935,11 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
 
                     # --- 1a. Upload user's pre-saved blog media ---
                     uploaded_user_media = False
+                    user_media_captions = []  # Collect captions for content generation
                     if use_uploaded_media and blog_media_store:
                         pending_media = blog_media_store.get_pending_media(chat_id)
                         if pending_media:
-                            await context.bot.send_message(chat_id=chat_id, text=f"📤 正在上传 {len(pending_media)} 张用户素材到博客...")
+                            await context.bot.send_message(chat_id=chat_id, text=f"\ud83d\udce4 \u6b63\u5728\u4e0a\u4f20 {len(pending_media)} \u5f20\u7528\u6237\u7d20\u6750\u5230\u535a\u5ba2...")
                             for idx, media_entry in enumerate(pending_media):
                                 try:
                                     img_bytes = blog_media_store.get_media_bytes(media_entry["id"])
@@ -940,15 +951,17 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                         if img_url:
                                             image_urls.append(img_url)
                                             media_ids.append(upload_id)
+                                            # Track caption for content generation
+                                            cap = media_entry.get("caption", "")
+                                            if cap:
+                                                user_media_captions.append(f"Image {idx+1}: {cap}")
                                             logger.info(f"Uploaded user blog media {idx+1}: {img_url}")
                                 except Exception as e:
                                     logger.error(f"Failed to upload user media {media_entry['id']}: {e}")
                             
                             uploaded_user_media = len(image_urls) > 0
                             if uploaded_user_media:
-                                # Reduce AI-generated image count since user provided their own
-                                image_count = max(0, image_count - len(image_urls))
-                                logger.info(f"User media uploaded: {len(image_urls)} images. Remaining AI images to generate: {image_count}")
+                                logger.info(f"User media uploaded: {len(image_urls)} images. AI image_count remains: {image_count}")
                         else:
                             logger.info("use_uploaded_media=True but no pending media found.")
 
@@ -1033,6 +1046,31 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                             f"{prior_content}\n\n"
                             f"Available Images (Embed ALL of these in order):\n{urls_list_str}\n\n"
                             f"Format this content as a Gutenberg block blog post. Keep the translation intact. Use ONLY the URLs above for images."
+                        )
+                    elif user_writing_instructions:
+                        # === USE USER'S OWN INSTRUCTIONS as the basis for blog ===
+                        # This is used when user uploads photos and says what to write about.
+                        # The blog content should be based on user's instructions, NOT generic AI-generated stuff.
+                        media_context = ""
+                        if user_media_captions:
+                            media_context = f"\n\nThe user uploaded {len(image_urls)} photos. Their descriptions/context: " + "; ".join(user_media_captions)
+                        
+                        blog_system_prompt = (
+                            "You are an expert blogger who writes based on the user's specific instructions and their uploaded photos. "
+                            "Output exclusively in JSON format: {\"title\": \"...\", \"content\": \"Gutenberg block content\", \"tags\": [\"tag1\", \"tag2\", ...]}. "
+                            "CRITICAL: Write the blog content BASED ON the user's instructions. The user has uploaded their own photos, "
+                            "so the text should naturally reference and discuss those photos as if the author took them. "
+                            "Write in the voice and perspective the user described. Do NOT make up generic content about the topic - "
+                            "follow the user's writing direction closely. "
+                            + gutenberg_format_instruction + tags_instruction
+                        )
+                        blog_user_prompt = (
+                            f"Topic: {topic}\n"
+                            f"Writing Instructions from user: {user_writing_instructions}\n"
+                            f"{media_context}\n\n"
+                            f"Available Images (Embed ALL of these at logical points in the article):\n{urls_list_str}\n\n"
+                            f"IMPORTANT: Use ONLY the URLs above for images. Write the blog following the user's instructions. "
+                            f"Refer to the uploaded photos naturally in the text (e.g. '\u5982\u56fe\u6240\u793a', '\u8fd9\u5f20\u7167\u7247\u4e2d', etc.)."
                         )
                     else:
                         # === FALLBACK: Generate from scratch ===
