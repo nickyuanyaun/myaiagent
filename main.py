@@ -941,14 +941,57 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # 2. User says "好，发布" → Need to use that chat-generated draft
                     if not prior_content and not user_writing_instructions:
                         history = context.user_data.get('history', [])
-                        # Look at the last few assistant messages for blog-like content
                         for msg in reversed(history[-6:]):
                             if msg.get('role') == 'assistant':
                                 content_text = msg.get('content', '')
                                 # Check if this looks like a blog draft (>200 chars with structure)
                                 if len(content_text) > 200 and ('###' in content_text or '**' in content_text or '博客' in content_text):
-                                    prior_content = content_text
-                                    logger.info(f"Found prior blog draft in conversation history ({len(prior_content)} chars)")
+                                    # Clean out any DRAW_ADVANCED prompts and meta-text
+                                    clean_lines = []
+                                    skip_draw = False
+                                    for line in content_text.split('\n'):
+                                        if 'DRAW_ADVANCED' in line or 'NEGATIVE:' in line:
+                                            skip_draw = True
+                                            continue
+                                        if skip_draw and line.strip() == '':
+                                            skip_draw = False
+                                            continue
+                                        if not skip_draw and '接下来' not in line and '生成' not in line.lower():
+                                            clean_lines.append(line)
+                                    cleaned = '\n'.join(clean_lines).strip()
+                                    if len(cleaned) > 150:
+                                        prior_content = cleaned
+                                        logger.info(f"Found prior blog draft in conversation history ({len(prior_content)} chars, cleaned from {len(content_text)})")
+                                        break
+                    
+                    # --- SAFETY: If user_writing_instructions is too short, try history fallback ---
+                    if user_writing_instructions and len(user_writing_instructions) < 20 and not prior_content:
+                        # "发布" or "好的，发布" is too short to generate a blog from
+                        history = context.user_data.get('history', [])
+                        for msg in reversed(history[-6:]):
+                            if msg.get('role') == 'assistant':
+                                content_text = msg.get('content', '')
+                                if len(content_text) > 200 and ('###' in content_text or '**' in content_text or '博客' in content_text):
+                                    # Clean DRAW_ADVANCED text
+                                    clean_lines = [l for l in content_text.split('\n') 
+                                                   if 'DRAW_ADVANCED' not in l and 'NEGATIVE:' not in l]
+                                    cleaned = '\n'.join(clean_lines).strip()
+                                    if len(cleaned) > 150:
+                                        prior_content = cleaned
+                                        user_writing_instructions = ""  # Clear short/useless instructions
+                                        logger.info(f"Short instructions overridden by history blog draft ({len(prior_content)} chars)")
+                                        break
+                    
+                    # --- ALSO: Check for user instructions from the PREVIOUS user message ---
+                    if not prior_content and not user_writing_instructions:
+                        history = context.user_data.get('history', [])
+                        for msg in reversed(history[-6:]):
+                            if msg.get('role') == 'user':
+                                user_text = msg.get('content', '')
+                                # User's previous detailed instructions (>50 chars, mentions blog keywords)
+                                if len(user_text) > 50 and any(kw in user_text for kw in ['博客', '发博客', '写博客', 'blog', '博文']):
+                                    user_writing_instructions = user_text
+                                    logger.info(f"Found user's blog instructions from previous message ({len(user_text)} chars)")
                                     break
                     
                     # 1. Prepare Images
@@ -1047,7 +1090,12 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                             # We continue to the next image instead of failing the whole task
 
                     if not image_urls:
-                        raise Exception("Failed to generate or upload any images for the blog post.")
+                        if effective_use_uploaded:
+                            # When using uploaded media, allow 0 images (content-only blog is OK)
+                            logger.warning("No images available but using uploaded media flow. Proceeding with text-only blog.")
+                            await context.bot.send_message(chat_id=chat_id, text="⚠️ 素材上传到WordPress失败，将发布纯文本博客。")
+                        else:
+                            raise Exception("Failed to generate or upload any images for the blog post.")
 
                     # 2. Generate Content — USE PRIOR CONTENT if available, else generate from scratch
                     urls_list_str = "\n".join([f"- IMAGE_URL_{i+1}: {url}" for i, url in enumerate(image_urls)])
@@ -1133,7 +1181,25 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         config=types.GenerateContentConfig(system_instruction=blog_system_prompt, response_mime_type='application/json')
                     )
                     
-                    blog_data = json.loads(blog_response.text)
+                    # Robust JSON parsing with fallback
+                    raw_text = blog_response.text
+                    try:
+                        blog_data = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        # Try extracting JSON from markdown code blocks
+                        logger.warning("Direct JSON parse failed, trying code block extraction...")
+                        import re
+                        json_match = re.search(r'```(?:json)?\s*\n?(\{.*?\})\s*```', raw_text, re.DOTALL)
+                        if json_match:
+                            blog_data = json.loads(json_match.group(1))
+                        else:
+                            # Last resort: find first { to last }
+                            start = raw_text.find('{')
+                            end = raw_text.rfind('}')
+                            if start != -1 and end != -1:
+                                blog_data = json.loads(raw_text[start:end+1])
+                            else:
+                                raise Exception(f"Blog content generation returned invalid JSON: {raw_text[:200]}")
                     title = blog_data.get("title", topic)
                     content = blog_data.get("content", "")
                     auto_tags = blog_data.get("tags", [])
