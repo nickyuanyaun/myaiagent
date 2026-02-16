@@ -639,11 +639,24 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     analysis = {}
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # --- Inject pending blog media context for QwenBrain ---
+    qwen_input = user_input
+    if blog_media_store:
+        pending_count = blog_media_store.get_media_count(chat_id)
+        if pending_count > 0:
+            qwen_input = (
+                f"[SYSTEM CONTEXT: The user has {pending_count} blog media images saved and waiting to be used. "
+                f"If user says to publish/post a blog, set use_uploaded_media=true and source_content='user_instructions'. "
+                f"Do NOT create image_generation tasks.]\n\n"
+                f"{user_input}"
+            )
+            logger.info(f"Injected blog media context: {pending_count} pending images")
+
     if qwen_brain:
         logger.info("Starting DeepSeek Analysis (Tasks)...")
         try:
             analysis = await asyncio.wait_for(
-                asyncio.to_thread(qwen_brain.analyze_message, user_input, current_time_str),
+                asyncio.to_thread(qwen_brain.analyze_message, qwen_input, current_time_str),
                 timeout=60.0
             )
             logger.info(f"Qwen Task Plan: {analysis}")
@@ -922,6 +935,22 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         user_writing_instructions = instructions
                         logger.info(f"Using user_instructions for blog content: {user_writing_instructions[:100]}...")
                     
+                    # --- FALLBACK: Check conversation history for prior blog draft ---
+                    # This handles the case where:
+                    # 1. User uploads photos → Bot generates blog draft as chat reply
+                    # 2. User says "好，发布" → Need to use that chat-generated draft
+                    if not prior_content and not user_writing_instructions:
+                        history = context.user_data.get('history', [])
+                        # Look at the last few assistant messages for blog-like content
+                        for msg in reversed(history[-6:]):
+                            if msg.get('role') == 'assistant':
+                                content_text = msg.get('content', '')
+                                # Check if this looks like a blog draft (>200 chars with structure)
+                                if len(content_text) > 200 and ('###' in content_text or '**' in content_text or '博客' in content_text):
+                                    prior_content = content_text
+                                    logger.info(f"Found prior blog draft in conversation history ({len(prior_content)} chars)")
+                                    break
+                    
                     # 1. Prepare Images
                     image_urls = []
                     media_ids = []
@@ -936,7 +965,18 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # --- 1a. Upload user's pre-saved blog media ---
                     uploaded_user_media = False
                     user_media_captions = []  # Collect captions for content generation
-                    if use_uploaded_media and blog_media_store:
+                    
+                    # AUTO-DETECT: If there are pending blog media, use them even if Qwen didn't set use_uploaded_media
+                    effective_use_uploaded = use_uploaded_media
+                    if not effective_use_uploaded and blog_media_store:
+                        auto_pending = blog_media_store.get_pending_media(chat_id)
+                        if auto_pending:
+                            effective_use_uploaded = True
+                            logger.info(f"Auto-detected {len(auto_pending)} pending blog media. Overriding use_uploaded_media to True.")
+                            # Also reduce AI image count since user has their own
+                            image_count = min(image_count, 1)
+                    
+                    if effective_use_uploaded and blog_media_store:
                         pending_media = blog_media_store.get_pending_media(chat_id)
                         if pending_media:
                             await context.bot.send_message(chat_id=chat_id, text=f"\ud83d\udce4 \u6b63\u5728\u4e0a\u4f20 {len(pending_media)} \u5f20\u7528\u6237\u7d20\u6750\u5230\u535a\u5ba2...")
