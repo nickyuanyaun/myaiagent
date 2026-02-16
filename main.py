@@ -947,16 +947,27 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         user_writing_instructions = instructions
                         logger.info(f"Using user_instructions for blog content: {user_writing_instructions[:100]}...")
                     
-                    # --- FALLBACK: Check conversation history for prior blog draft ---
-                    # This handles the case where:
-                    # 1. User uploads photos → Bot generates blog draft as chat reply
-                    # 2. User says "好，发布" → Need to use that chat-generated draft
-                    if not prior_content and not user_writing_instructions:
+                    # --- PRIORITY 1: Find user's ORIGINAL blog instructions from conversation history ---
+                    # This is the HIGHEST quality source — the user's own words about what to write.
+                    # Search for this FIRST, regardless of whether prior_content or instructions exist.
+                    if not user_writing_instructions or len(user_writing_instructions) < 20:
+                        history = context.user_data.get('history', [])
+                        for msg in reversed(history[-10:]):
+                            if msg.get('role') == 'user':
+                                user_text = msg.get('content', '')
+                                # User's previous detailed instructions (>50 chars, mentions blog keywords)
+                                if len(user_text) > 50 and any(kw in user_text for kw in ['博客', '发博客', '写博客', 'blog', '博文', '发布']):
+                                    user_writing_instructions = user_text
+                                    logger.info(f"[PRIORITY 1] Found user's original blog instructions ({len(user_text)} chars)")
+                                    break
+                    
+                    # --- PRIORITY 2: Fall back to assistant's prior blog draft ---
+                    # Only used when NO user instructions were found at all.
+                    if not user_writing_instructions and not prior_content:
                         history = context.user_data.get('history', [])
                         for msg in reversed(history[-6:]):
                             if msg.get('role') == 'assistant':
                                 content_text = msg.get('content', '')
-                                # Check if this looks like a blog draft (>200 chars with structure)
                                 if len(content_text) > 200 and ('###' in content_text or '**' in content_text or '博客' in content_text):
                                     # Clean out any DRAW_ADVANCED prompts and meta-text
                                     clean_lines = []
@@ -968,43 +979,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                         if skip_draw and line.strip() == '':
                                             skip_draw = False
                                             continue
-                                        if not skip_draw and '接下来' not in line and '生成' not in line.lower():
+                                        if not skip_draw:
                                             clean_lines.append(line)
                                     cleaned = '\n'.join(clean_lines).strip()
                                     if len(cleaned) > 150:
                                         prior_content = cleaned
-                                        logger.info(f"Found prior blog draft in conversation history ({len(prior_content)} chars, cleaned from {len(content_text)})")
+                                        logger.info(f"[PRIORITY 2] Using assistant blog draft as fallback ({len(prior_content)} chars, cleaned from {len(content_text)})")
                                         break
-                    
-                    # --- SAFETY: If user_writing_instructions is too short, try history fallback ---
-                    if user_writing_instructions and len(user_writing_instructions) < 20 and not prior_content:
-                        # "发布" or "好的，发布" is too short to generate a blog from
-                        history = context.user_data.get('history', [])
-                        for msg in reversed(history[-6:]):
-                            if msg.get('role') == 'assistant':
-                                content_text = msg.get('content', '')
-                                if len(content_text) > 200 and ('###' in content_text or '**' in content_text or '博客' in content_text):
-                                    # Clean DRAW_ADVANCED text
-                                    clean_lines = [l for l in content_text.split('\n') 
-                                                   if 'DRAW_ADVANCED' not in l and 'NEGATIVE:' not in l]
-                                    cleaned = '\n'.join(clean_lines).strip()
-                                    if len(cleaned) > 150:
-                                        prior_content = cleaned
-                                        user_writing_instructions = ""  # Clear short/useless instructions
-                                        logger.info(f"Short instructions overridden by history blog draft ({len(prior_content)} chars)")
-                                        break
-                    
-                    # --- ALSO: Check for user instructions from the PREVIOUS user message ---
-                    if not prior_content and not user_writing_instructions:
-                        history = context.user_data.get('history', [])
-                        for msg in reversed(history[-6:]):
-                            if msg.get('role') == 'user':
-                                user_text = msg.get('content', '')
-                                # User's previous detailed instructions (>50 chars, mentions blog keywords)
-                                if len(user_text) > 50 and any(kw in user_text for kw in ['博客', '发博客', '写博客', 'blog', '博文']):
-                                    user_writing_instructions = user_text
-                                    logger.info(f"Found user's blog instructions from previous message ({len(user_text)} chars)")
-                                    break
                     
                     # 1. Prepare Images
                     image_urls = []
@@ -1248,6 +1229,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     cat_info = f"，分类: {user_category}" if user_category else ""
                     await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功（包含 {len(image_urls)} 张图片{tag_info}{cat_info}）！\n🔗 {link}")
                     execution_log.append(f"[System] Published multimedia blog post with {len(image_urls)} images: {link}")
+                    execution_log.append(
+                        "[System] IMPORTANT: The blog post has been SUCCESSFULLY PUBLISHED to WordPress. "
+                        "DO NOT regenerate, rewrite, or output blog content in your response. "
+                        "DO NOT output DRAW_ADVANCED or image generation prompts. "
+                        "Simply confirm the publication was successful and mention the link. "
+                        "Keep your response brief and conversational."
+                    )
 
                     import shutil
                     shutil.rmtree(task_subdir)
