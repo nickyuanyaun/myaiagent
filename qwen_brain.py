@@ -1,21 +1,20 @@
 
-import ollama
 import json
 import logging
+import re
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QwenBrain:
-    def __init__(self, model_name="deepseek-r1:14b"):
+    def __init__(self, genai_client, model_name="gemini-2.0-flash"):
+        self.genai_client = genai_client
         self.model_name = model_name
-        # Use explicit client with 127.0.0.1 to avoid localhost resolution issues on Windows
-        self.client = ollama.Client(host='http://127.0.0.1:11434')
 
     def analyze_message(self, user_text: str, current_time: str = None):
         """
-        Ask Qwen (now DeepSeek-R1) to analyze the message and return a LIST of tasks.
+        Use Gemini to analyze the message and return a LIST of tasks.
         """
         if not current_time:
              current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -146,47 +145,22 @@ class QwenBrain:
         """
         
         try:
-            # 1. Broad Try/Except for Ollama connection
-            try:
-                response = self.client.chat(model=self.model_name, messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_text},
-                ], format='json')
-            except Exception as conn_err:
-                logger.error(f"Ollama Connection Error: {conn_err}")
-                raise conn_err # Re-raise to be caught by outer block or handled
+            from google.genai import types
+            response = self.genai_client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(role="user", parts=[types.Part(text=f"{system_prompt}\n\nUser message: {user_text}")])
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                )
+            )
 
-            content = response['message']['content']
+            content = response.text.strip()
+            logger.info(f"Gemini Task Analysis Output: {content}")
             
-            # --- DeepSeek-R1 Specific Cleanup ---
-            # Remove <think>...</think> blocks
-            import re
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-            
-            # Sanitize content: remove markdown code blocks if present
-            content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
-            logger.info(f"Raw DeepSeek Output (Cleaned): {content}") # Debug log
-            
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                # Fallback: sometimes it adds extra text. Try to find the first { and last }
-                start = content.find('{')
-                end = content.rfind('}')
-                if start != -1 and end != -1:
-                    content = content[start:end+1]
-                    parsed = json.loads(content)
-                else:
-                    logger.error("Failed to parse JSON even after cleanup.")
-                    raise
+            parsed = json.loads(content)
             
             # Ensure "tasks" key exists
             if "tasks" not in parsed:
@@ -209,7 +183,7 @@ class QwenBrain:
             return parsed
             
         except Exception as e:
-            logger.error(f"Qwen analysis failed: {e}")
+            logger.error(f"Gemini analysis failed: {e}")
             # Return empty task list on failure
             return {"tasks": []}
 
@@ -224,7 +198,7 @@ class QwenBrain:
 
     def filter_memories(self, user_text: str, candidate_memories: list) -> list:
         """
-        Ask Qwen to select which memories are relevant to the user's text.
+        Use Gemini to select which memories are relevant to the user's text.
         Returns a subset of candidate_memories.
         """
         if not candidate_memories:
@@ -232,8 +206,7 @@ class QwenBrain:
             
         candidates_str = "\n".join([f"{i}. {m}" for i, m in enumerate(candidate_memories)])
         
-        system_prompt = f"""
-        You are a relevance filter. 
+        prompt = f"""You are a relevance filter. 
         User Message: "{user_text}"
         
         Candidate Memories:
@@ -250,35 +223,39 @@ class QwenBrain:
         """
         
         try:
-             response = self.client.chat(model=self.model_name, messages=[
-                {'role': 'system', 'content': system_prompt}
-            ], format='json')
+            from google.genai import types
+            response = self.genai_client.models.generate_content(
+                model=self.model_name,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                )
+            )
              
-             content = response['message']['content']
-             # Cleanup
-             import re
-             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-             if content.startswith("```json"): content = content[7:]
-             if content.endswith("```"): content = content[:-3]
+            content = response.text.strip()
+            logger.info(f"Gemini Filter Output (Indices): {content}")
+            indices = json.loads(content)
              
-             logger.info(f"DeepSeek Filter Output (Indices): {content}")
-             indices = json.loads(content.strip())
-             
-             if isinstance(indices, list):
-                 selected = []
-                 for i in indices:
-                     if isinstance(i, int) and 0 <= i < len(candidate_memories):
-                         selected.append(candidate_memories[i])
+            if isinstance(indices, list):
+                selected = []
+                for i in indices:
+                    if isinstance(i, int) and 0 <= i < len(candidate_memories):
+                        selected.append(candidate_memories[i])
                  
-                 if not selected:
-                      logger.warning("DeepSeek Filter returned empty list.")
-                 return selected
-             return []
+                if not selected:
+                     logger.warning("Gemini Filter returned empty list.")
+                return selected
+            return []
              
         except Exception as e:
             logger.error(f"Memory filtering failed: {e}")
-            return candidate_memories # Fallback to all if filter fails
+            return candidate_memories  # Fallback to all if filter fails
 
 if __name__ == "__main__":
-    brain = QwenBrain()
+    import os
+    from google import genai
+    api_key = os.getenv("GOOGLE_API_KEY")
+    client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+    brain = QwenBrain(client)
     print(brain.analyze_message("My birthday is on January 1st."))

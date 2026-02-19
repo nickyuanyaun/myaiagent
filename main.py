@@ -1626,7 +1626,7 @@ if __name__ == '__main__':
         print("Initializing Memory Store...")
         memory_store = MemoryStore()
         print("Initializing Qwen Brain...")
-        qwen_brain = QwenBrain() # Assumes Ollama is running
+        qwen_brain = QwenBrain(genai_client)  # Uses Gemini API
         print("Initializing Task Store...")
         task_store = TaskStore()
         print("Initializing Blog Media Store...")
