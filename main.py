@@ -1037,8 +1037,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # Send Images
                     if images:
                         if len(images) > 1:
-                            from telegram import InputMediaPhoto
-                            media_group = [InputMediaPhoto(img_data, caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
+                            media_group = [InputMediaPhoto(io.BytesIO(img_data), caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
                             await context.bot.send_media_group(chat_id=chat_id, media=media_group)
                         else:
                             await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption=f"✨ {prompt[:100]}...")
