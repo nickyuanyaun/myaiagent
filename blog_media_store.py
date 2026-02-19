@@ -103,6 +103,24 @@ class BlogMediaStore:
                     return None
         return None
 
+    def get_media(self, chat_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all pending media for a chat, including the binary data.
+        Returns a list of dicts: {'filename': str, 'data': bytes, 'caption': str}
+        """
+        pending = self.get_pending_media(chat_id)
+        results = []
+        for entry in pending:
+            data = self.get_media_bytes(entry['id'])
+            if data:
+                # Return a dict compatible with what WordPressClient expects
+                results.append({
+                    "filename": entry.get("original_filename", entry["filename"]),
+                    "data": data,
+                    "caption": entry.get("caption", "")
+                })
+        return results
+
     def mark_published(self, chat_id: int):
         """Mark all pending media for a chat as published."""
         count = 0

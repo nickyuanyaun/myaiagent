@@ -38,11 +38,11 @@ class QwenBrain:
                     "is_news": true
                 }},
                 {{
-                     "type": "image_generation",
-                     "prompt": "A cyberpunk cat",
-                     "negative_prompt": "blurry, low quality",
-                     "count": 1,
-                     "action": "draw" 
+                    "type": "image_generation",
+                    "prompt": "A cyberpunk cat",
+                    "negative_prompt": "blurry, low quality",
+                    "count": 1,
+                    "action": "draw" 
                 }},
                 {{
                     "type": "translation",
@@ -54,14 +54,13 @@ class QwenBrain:
                     "type": "blog_media_save"
                 }},
                 {{
-                    "type": "wordpress_post",
+                    "type": "blog_write_draft",
                     "topic": "The future of AI Agents",
                     "instructions": "Write a professional article...",
-                    "image_prompt": "A futuristic robot working on a laptop",
-                    "source_content": "user_instructions",
-                    "category": "科技",
-                    "use_uploaded_media": true,
-                    "image_count": 0
+                    "category": "科技"
+                }},
+                 {{
+                    "type": "blog_publish_draft"
                 }},
                 {{
                     "type": "reminder",
@@ -87,7 +86,8 @@ class QwenBrain:
            
         3. "image_generation": Use when user asks to generate/draw/create an image.
            - If user asks to DRAW or EDIT an image.
-           - 'action': "draw" or "edit".
+           - 'action': "draw", "edit", or "blend".
+           - Use 'action': "blend" when user asks to "combine", "mix", "merge", or "compose" MULTIPLE images (e.g. "mix these").
            - 'count': Number of images to generate (default 1). If user says "3 images", set count to 3.
            - 'prompt': Detailed positive prompt.
            - 'negative_prompt': Optional.
@@ -105,42 +105,43 @@ class QwenBrain:
            - 'source_url': The URL of the article to translate. Use web_search first to fetch the content.
            - 'target_language': The target language (e.g. "中文", "English").
            - 'instructions': Any specific translation instructions.
-           - IMPORTANT: If user wants to translate AND publish, create BOTH a web_search task (to fetch the article), a translation task, AND a wordpress_post task with "source_content": "prior_tasks".
+           - IMPORTANT: If user wants to translate AND publish, create BOTH a web_search task (to fetch the article), a translation task, AND a blog_write_draft task with "source_content": "prior_tasks".
 
-        7. **wordpress_post**:
-           - Publish a blog post to WordPress.
+        7. **blog_write_draft**:
+           - Use when user wants to WRITE or PREPARE a blog post.
            - 'topic': The blog topic.
-           - 'instructions': Writing instructions. CRITICAL: Copy the user's full instructions/requirements here so the blog generator can follow them.
-           - 'image_prompt': Prompt for generating AI blog images. Only needed when image_count > 0.
+           - 'instructions': Copy the user's FULL message content here verbatim.
+           - 'category': Category name if user specifies one.
            - 'source_content': 
-             - "prior_tasks" = use translated/searched content from earlier tasks
-             - "user_instructions" = use the user's own text/instructions as the basis for blog content (when user describes what to write, NOT translating)
-             - omit or "" = generate content from scratch based on topic
-           - 'category': Category name if user specifies one (e.g. "科技", "生活", "教育"). If user doesn't specify, omit this field.
-           - 'use_uploaded_media': Set to true if user has uploaded/saved blog media images and wants to use them in the post.
-           - 'image_count': Number of AI images to generate. CRITICAL RULES:
-             - When user says to use their uploaded photos AND says "不用生成图片"/"不要生成内容图片"/"只要缩略图", set image_count to 0 or 1.
-             - When use_uploaded_media is true, default image_count should be 1 (just a thumbnail/featured image) unless user says otherwise.
-             - When use_uploaded_media is false or omitted, default is 3.
-           - CRITICAL: When user asks to translate an article and publish it as a blog, you MUST set "source_content": "prior_tasks".
-           - CRITICAL: When user sends photos and says to write a blog using those photos, set use_uploaded_media=true AND do NOT create a separate image_generation task.
+             - "user_provided_content": User provides full text.
+             - "prior_tasks": Use content from search/translation.
+             - "user_instructions": User gives instruction (e.g. "Write about X").
+           - CRITICAL AND NEW: If user says "Write and Publish", you MUST generate a sequence:
+             1. `blog_write_draft` (to generate text)
+             2. `image_generation` (to generate cover image, unless user provided media)
+             3. `blog_publish_draft` (to actually publish)
 
-        8. **blog_media_save**:
+        8. **blog_publish_draft**:
+           - Use when user wants to PUBLISH the currently drafted blog post.
+           - Usually follows `blog_write_draft` in the same list.
+           - No arguments needed.
+
+        9. **blog_media_save**:
            - Use when user sends image(s) and explicitly says they are for a blog post, OR when user sends images AND asks to create a blog post using them in the same message.
            - Keywords: "博客用", "用于博客", "博客素材", "blog media", "for my blog", "博客图片", "发博客", "写博客"
            - Return: {{"type": "blog_media_save"}}
            - NOTE: This only marks intent. The photo handler saves the actual images.
-           - MUST appear BEFORE wordpress_post in the task list.
+           - MUST appear BEFORE blog_write_draft in the task list.
 
-        9. **blog_media_clear**:
+        10. **blog_media_clear**:
            - Use when user wants to clear/delete/reset all pending blog media images.
            - Keywords: "清空素材", "删除素材", "清空博客素材", "删除博客图片", "重置素材", "clear media", "reset blog media"
            - Return: {{"type": "blog_media_clear"}}
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
-        - Sort tasks logically: blog_media_save -> web_search -> translation -> image_generation -> wordpress_post.
-        - NEVER create an image_generation task when user says to use their uploaded images for the blog post. The image_generation task is for standalone image requests, NOT for blog images.
+        - Sort tasks logically: blog_media_save -> web_search -> translation -> blog_write_draft -> image_generation -> blog_publish_draft.
+        - NEVER create an image_generation task when user says to use their uploaded images for the blog post.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """
         

@@ -130,35 +130,39 @@ def generate_image_native(prompt: str, negative_prompt: str = None, count: int =
             logger.error(f"Generate Content Error: {e}")
             raise e
 
-def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str | None = None, count: int = 1) -> list[bytes]:
+def generate_image_composition(prompt: str, images: list[bytes], negative_prompt: str | None = None, count: int = 1) -> list[bytes]:
     """
-    Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
+    Bio-inspired Image Composition (Image-to-Image / Blend) using Nano Banana Pro.
     Returns list of bytes.
     """
-    full_prompt = f"Edit this image to match the following description. Maintain the original composition and subject where possible: {prompt}"
+    full_prompt = f"Compose a new image based on these input images. {prompt}"
     if negative_prompt:
         full_prompt += f"\nNegative Prompt: {negative_prompt}"
     
     if count > 1:
         full_prompt += f"\n(Please generate {count} distinct variations)"
         
-    logger.info(f"Editing Image via Nano Banana Pro with prompt: {full_prompt}")
+    logger.info(f"Composing Image via Nano Banana Pro with {len(images)} images and prompt: {full_prompt}")
     max_retries = 3
     base_delay = 2
     
     for attempt in range(max_retries):
         try:
             from PIL import Image
-            input_img = Image.open(io.BytesIO(image_bytes))
+            
+            # Prepare contents: [img1, img2, ..., prompt]
+            contents = []
+            for img_bytes in images:
+                contents.append(Image.open(io.BytesIO(img_bytes)))
+            contents.append(full_prompt)
             
             config = types.GenerateContentConfig(
                 response_modalities=['TEXT', 'IMAGE']
             )
 
-            # Use models.generate_content for edit too
             response = genai_client.models.generate_content(
                 model="gemini-3-pro-image-preview",
-                contents=[input_img, full_prompt],
+                contents=contents,
                 config=config
             )
             
@@ -181,18 +185,26 @@ def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str | 
             if found_images:
                 return found_images
             else:
-                raise Exception("No edited images found in response.")
+                raise Exception("No composed images found in response.")
 
         except Exception as e:
             error_msg = str(e)
             if ("503" in error_msg or "UNAVAILABLE" in error_msg) and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
-                logger.warning(f"Gemini Edit 503 | Retry {attempt+1}/{max_retries} in {delay}s... Error: {error_msg}")
+                logger.warning(f"Gemini Composition 503 | Retry {attempt+1}/{max_retries} in {delay}s... Error: {error_msg}")
                 time.sleep(delay)
                 continue
                 
-            logger.error(f"Generate Content Edit Error: {e}")
+            logger.error(f"Generate Content Composition Error: {e}")
             raise e
+
+def generate_image_edit(prompt: str, image_bytes: bytes, negative_prompt: str | None = None, count: int = 1) -> list[bytes]:
+    """
+    Bio-inspired Image Editing (Image-to-Image) using Nano Banana Pro.
+    Returns list of bytes.
+    """
+    return generate_image_composition(prompt, [image_bytes], negative_prompt, count)
+
 
 # 3. Global Instances
 # In a robust app these would be in a Context object, but for a script globals are fine.
@@ -580,6 +592,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
     download_status_msg = None
     batch_id = str(uuid.uuid4())
     agenda_msg_id = None
+    batch_context = {}  # Fix: Initialize batch context for multi-step data sharing
     
     # --- Phase 0: Check if user is confirming media cleanup ---
     if context.user_data.get('pending_media_cleanup'):
@@ -797,42 +810,250 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                 action = task_payload.get("action", "draw")
                 
                 if prompt:
-                     try:
-                         # Edit Check
-                         images = []
-                         if action == "edit":
-                             input_image_bytes = context.user_data.get('last_image_bytes')
-                             if not input_image_bytes:
-                                 await context.bot.send_message(chat_id=chat_id, text="⚠️ 无法编辑: 没找到上一张图.")
-                                 execution_log.append("[System] Image Edit Failed: No input image.")
-                                 success = False
-                                 error_msg = "No source image for edit"
-                                 continue
-                             images = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes, neg_prompt, count)
-                         else:
-                             # Draw
-                             images = await asyncio.to_thread(generate_image_native, prompt, neg_prompt, count)
+                    try:
+                        generated_images = []
+                        
+                        # A. Composition / Blend
+                        if action == "blend" or action == "compose":
+                            # Gather all images
+                            composition_images = []
+                            if image_b64:
+                                composition_images.append(base64.b64decode(image_b64))
+                            if additional_images:
+                                for b64 in additional_images:
+                                    composition_images.append(base64.b64decode(b64))
+                            
+                            if not composition_images and context.user_data.get('last_image_bytes'):
+                                # Fallback to last seen image if none in current message
+                                composition_images.append(context.user_data['last_image_bytes'])
+                                
+                            if composition_images:
+                                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                                generated_images = await asyncio.to_thread(
+                                    generate_image_composition, prompt, composition_images, neg_prompt, count
+                                )
+                            else:
+                                success = False
+                                error_msg = "No images provided for composition."
+                                await context.bot.send_message(chat_id=chat_id, text="⚠️ 需要提供图片才能进行融合/合成。")
+
+                        # B. Edit
+                        elif action == "edit":
+                            # Use current image or last cached image
+                            target_image_bytes = None
+                            if image_b64:
+                                target_image_bytes = base64.b64decode(image_b64)
+                            elif context.user_data.get('last_image_bytes'):
+                                target_image_bytes = context.user_data['last_image_bytes']
+                                
+                            if target_image_bytes:
+                                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                                generated_images = await asyncio.to_thread(
+                                    generate_image_edit, prompt, target_image_bytes, neg_prompt, count
+                                )
+                            else:
+                                success = False
+                                error_msg = "No image found to edit."
+                                await context.bot.send_message(chat_id=chat_id, text="⚠️ 请上传图片或引用上一张图片进行编辑。")
+                        
+                        # C. Draw (Native)
+                        else:
+                            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                            generated_images = await asyncio.to_thread(
+                                generate_image_native, prompt, neg_prompt, count
+                            )
+
+                        # Handle Results
+                        if generated_images:
+                            # 1. If we are in a Blog Draft flow, save to batch context
+                            if "blog_draft" in batch_context:
+                                if "blog_images" not in batch_context:
+                                    batch_context["blog_images"] = []
+                                batch_context["blog_images"].extend(generated_images)
+                                await context.bot.send_message(chat_id=chat_id, text=f"🎨 配图已生成 ({len(generated_images)} 张)，准备发布...")
+                                execution_log.append(f"[System] Generated {len(generated_images)} images for blog draft.")
+                            
+                            # 2. Otherwise/Also send to chat
+                            else:
+                                media_group = []
+                                for img_bytes in generated_images:
+                                    # Update cache for future edits
+                                    context.user_data['last_image_bytes'] = img_bytes
+                                    media_group.append(InputMediaPhoto(io.BytesIO(img_bytes)))
+                                
+                                await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                                execution_log.append(f"[System] Generated/Edited {len(generated_images)} images.")
+                                
+                    except Exception as e:
+                        success = False
+                        error_msg = str(e)
+                        logger.error(f"Image Gen Error: {e}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ 图片生成失败: {e}")
+                else:
+                    success = False
+                    error_msg = "No prompt provided"
+
+            # --- Blog Write Draft ---
+            elif task_type == "blog_write_draft":
+                topic = task_payload.get("topic")
+                instructions = task_payload.get("instructions", "")
+                category = task_payload.get("category", "Uncategorized")
+                source_content = task_payload.get("source_content", "")
+                
+                await context.bot.send_message(chat_id=chat_id, text=f"✍️ 正在撰写博客草稿: {topic}...")
+                
+                # Use Qwen to write the content
+                try:
+                    # Construct prompt for the writer
+                    writer_prompt = f"撰写一篇高质量的WordPress博客文章，主题: {topic}.\n\n"
+                    writer_prompt += "重要: 默认使用中文撰写，除非用户在指令中明确指定了其他语言。\n\n"
+                    if source_content == "user_provided_content":
+                        writer_prompt += f"需要排版的内容:\n{instructions}\n\n任务: 将以上内容排版为博客文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
+                    elif source_content == "prior_tasks":
+                         writer_prompt += f"上下文/指令:\n{instructions}\n\n任务: 撰写文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
+                    else:
+                        writer_prompt += f"写作指令:\n{instructions}\n\n任务: 撰写一篇有创意、有深度的文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
+
+                    # Call Qwen (simplified for now, using memory_store Qwen instance if available or just raw text gen)
+                    # Actually we have qwen_brain. let's use a simple generation method if exposed, or fallback to direct client.
+                    # QwenBrain doesn't expose raw chat easily. Let's add a helper or use the genai_client for text too? 
+                    # Let's use genai_client (Gemini) for writing as it's better at long form, or Qwen via ollama directly.
+                    # Let's use Gemini for the writing part since it replaces the 'Nano Banana Pro' persona well.
+                    
+                    draft_resp = genai_client.models.generate_content(
+                        model="gemini-2.0-flash", # Use a text model
+                        contents=[writer_prompt],
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                    
+                    if draft_resp.text:
+                         draft_data = json.loads(draft_resp.text)
+                         title = draft_data.get("title", topic)
+                         content_body = draft_data.get("content", "")
                          
-                         # Send Images
-                         if images:
-                             if len(images) > 1:
-                                 from telegram import InputMediaPhoto
-                                 media_group = [InputMediaPhoto(img_data, caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
-                                 await context.bot.send_media_group(chat_id=chat_id, media=media_group)
-                             else:
-                                 await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption=f"✨ {prompt[:100]}...")
-                             
-                             execution_log.append(f"[System] Successfully generated {len(images)} images for prompt '{prompt}'.")
-                         else:
-                             success = False
-                             error_msg = "No images returned from SDK"
-                         
-                     except Exception as e:
-                         logger.error(f"Image Gen Failed: {e}")
-                         await context.bot.send_message(chat_id=chat_id, text=f"❌ 图片生成失败: {e}")
-                         execution_log.append(f"[System] Image generation failed: {e}")
-                         success = False
-                         error_msg = str(e)
+                         batch_context["blog_draft"] = {
+                             "title": title,
+                             "content": content_body,
+                             "category": category,
+                             "status": "draft"
+                         }
+                         execution_log.append(f"[System] Blog draft written: {title}")
+                         await context.bot.send_message(chat_id=chat_id, text=f"✅ 草稿已完成: {title}")
+                    else:
+                        raise Exception("Empty response from Writer AI")
+
+                except Exception as e:
+                    success = False
+                    error_msg = f"Draft writing failed: {e}"
+                    logger.error(error_msg)
+
+            # --- Blog Publish Draft ---
+            elif task_type == "blog_publish_draft":
+                draft = batch_context.get("blog_draft")
+                if not draft:
+                    success = False
+                    error_msg = "No blog draft found in context to publish."
+                    await context.bot.send_message(chat_id=chat_id, text="❌ 无法发布: 未找到草稿。")
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=f"🚀 正在发布: {draft['title']}...")
+                    try:
+                        # Collect Images
+                        # 1. Generated in this batch
+                        batch_images = batch_context.get("blog_images", []) # list of bytes
+                        
+                        # 2. Uploaded/Saved in Store (if requested)
+                        # We need to know if we SHOULD use them. 
+                        # Ideally `blog_write_draft` or `qwen` told us. 
+                        # Let's check `blog_media_store` count.
+                        media_store_images = []
+                        if blog_media_store and blog_media_store.get_media_count(chat_id) > 0:
+                             # If we have them, let's use them? Qwen explicitly handles `use_uploaded_media` flag 
+                             # but that was in `wordpress_post`. In split flow, we might lose that flag.
+                             # Heuristic: If we have stored media, use it.
+                             media_store_images = blog_media_store.get_media(chat_id)
+                        
+                        # Client call — read credentials from env vars
+                        wp_user = os.getenv("WP_USER")
+                        wp_password = os.getenv("WP_PASSWORD")
+                        wp_url = os.getenv("WP_BASE_URL", "")
+                        client = WordPressClient(wp_url, wp_user, wp_password)
+                        
+                        # Extract captions from stored media for AI formatting context 
+                        captions = [item.get("caption", "") for item in media_store_images] if media_store_images else None
+                        
+                        await context.bot.send_message(chat_id=chat_id, text="📐 正在使用AI排版博客内容...")
+                        
+                        post_url = client.create_post_unified(
+                            title=draft['title'],
+                            content=draft['content'],
+                            category_names=[draft['category']],
+                            generated_images=batch_images,
+                            stored_media_images=media_store_images,
+                            genai_client=genai_client,
+                            stored_media_captions=captions
+                        )
+                        
+                        if post_url:
+                            await context.bot.send_message(chat_id=chat_id, text=f"✅ 发布成功! \n{post_url}")
+                            execution_log.append(f"[System] Published blog: {post_url}")
+                            execution_log.append(
+                                "[System] IMPORTANT: The blog post has been SUCCESSFULLY PUBLISHED to WordPress. "
+                                "DO NOT regenerate, rewrite, or output blog content in your response. "
+                                "DO NOT output DRAW_ADVANCED or image generation prompts. "
+                                "Simply confirm the publication was successful and mention the link. "
+                                "Keep your response brief and conversational."
+                            )
+                            # Cleanup media store
+                            if blog_media_store and media_store_images:
+                                blog_media_store.mark_published(chat_id)
+                                blog_media_store.delete_published(chat_id)
+                        else:
+                            raise Exception("WordPress client returned None")
+
+                    except Exception as e:
+                        success = False
+                        error_msg = f"Publish failed: {e}"
+                        logger.error(error_msg)
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ 发布失败: {e}")
+
+            # --- WordPress Post (Legacy/Unified) ---
+            elif task_type == "wordpress_post":
+                try:
+                    # Edit Check
+                    images = []
+                    if action == "edit":
+                        input_image_bytes = context.user_data.get('last_image_bytes')
+                        if not input_image_bytes:
+                            await context.bot.send_message(chat_id=chat_id, text="⚠️ 无法编辑: 没找到上一张图.")
+                            execution_log.append("[System] Image Edit Failed: No input image.")
+                            success = False
+                            error_msg = "No source image for edit"
+                            continue
+                        images = await asyncio.to_thread(generate_image_edit, prompt, input_image_bytes, neg_prompt, count)
+                    else:
+                        # Draw
+                        images = await asyncio.to_thread(generate_image_native, prompt, neg_prompt, count)
+                    
+                    # Send Images
+                    if images:
+                        if len(images) > 1:
+                            from telegram import InputMediaPhoto
+                            media_group = [InputMediaPhoto(img_data, caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
+                            await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                        else:
+                            await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption=f"✨ {prompt[:100]}...")
+                        
+                        execution_log.append(f"[System] Successfully generated {len(images)} images for prompt '{prompt}'.")
+                    else:
+                        success = False
+                        error_msg = "No images returned from SDK"
+                
+                except Exception as e:
+                    logger.error(f"Image Gen Failed: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ 图片生成失败: {e}")
+                    execution_log.append(f"[System] Image generation failed: {e}")
+                    success = False
+                    error_msg = str(e)
     
             # --- Translation ---
             elif task_type == "translation":
@@ -927,8 +1148,14 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # === CONTENT PIPELINE ===
                     prior_content = ""
                     user_writing_instructions = ""
+                    user_verbatim_content = ""  # NEW: For user-provided full blog text
                     
-                    if source_content == "prior_tasks":
+                    if source_content == "user_provided_content":
+                        # User provided the ACTUAL COMPLETE blog text — use verbatim
+                        user_verbatim_content = instructions
+                        logger.info(f"Using user_provided_content for verbatim blog ({len(user_verbatim_content)} chars)")
+                    
+                    elif source_content == "prior_tasks":
                         # Collect translated content and search results from execution_log
                         for entry in execution_log:
                             if entry.startswith("[Translation Result]"):
@@ -947,10 +1174,37 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         user_writing_instructions = instructions
                         logger.info(f"Using user_instructions for blog content: {user_writing_instructions[:100]}...")
                     
+                    # --- PRIORITY 0: Detect user-provided FULL blog content from conversation history ---
+                    # If Qwen didn't set user_provided_content but user actually provided full text,
+                    # detect it here by looking for long formatted content in recent messages.
+                    if not user_verbatim_content and not prior_content:
+                        history = context.user_data.get('history', [])
+                        for msg in reversed(history[-10:]):
+                            if msg.get('role') == 'user':
+                                user_text = msg.get('content', '')
+                                # Detect full blog content: >200 chars, has heading markers or structured sections
+                                has_headings = any(marker in user_text for marker in ['# ', '## ', '### ', '**'])
+                                has_sections = user_text.count('\n') > 5
+                                is_long = len(user_text) > 200
+                                has_blog_keyword = any(kw in user_text for kw in ['博客', '发博客', '写博客', 'blog', '博文', '发布', '发博'])
+                                
+                                if is_long and has_headings and has_sections:
+                                    # This looks like full blog content, not just instructions
+                                    # Extract the actual blog text (strip any meta-instruction prefix)
+                                    content_text = user_text
+                                    # If the message has a separator like ---, use content after it
+                                    if '---' in content_text:
+                                        parts = content_text.split('---', 1)
+                                        if len(parts) > 1 and len(parts[1].strip()) > 100:
+                                            content_text = parts[1].strip()
+                                    
+                                    user_verbatim_content = content_text
+                                    logger.info(f"[PRIORITY 0] Auto-detected user's full blog content ({len(content_text)} chars)")
+                                    break
+                    
                     # --- PRIORITY 1: Find user's ORIGINAL blog instructions from conversation history ---
-                    # This is the HIGHEST quality source — the user's own words about what to write.
-                    # Search for this FIRST, regardless of whether prior_content or instructions exist.
-                    if not user_writing_instructions or len(user_writing_instructions) < 20:
+                    # Only used when NO verbatim content was found.
+                    if not user_verbatim_content and (not user_writing_instructions or len(user_writing_instructions) < 20):
                         history = context.user_data.get('history', [])
                         for msg in reversed(history[-10:]):
                             if msg.get('role') == 'user':
@@ -963,7 +1217,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     
                     # --- PRIORITY 2: Fall back to assistant's prior blog draft ---
                     # Only used when NO user instructions were found at all.
-                    if not user_writing_instructions and not prior_content:
+                    if not user_verbatim_content and not user_writing_instructions and not prior_content:
                         history = context.user_data.get('history', [])
                         for msg in reversed(history[-6:]):
                             if msg.get('role') == 'assistant':
@@ -1021,9 +1275,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                     img_bytes = blog_media_store.get_media_bytes(media_entry["id"])
                                     if img_bytes:
                                         fname = media_entry.get("original_filename", f"user_media_{idx}.jpg")
-                                        upload_id = await asyncio.to_thread(wp.upload_media, img_bytes, fname)
-                                        media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
-                                        img_url = media_info.get("source_url")
+                                        upload_result = await asyncio.to_thread(wp.upload_media, img_bytes, fname)
+                                        img_url = upload_result.get("source_url", "") if isinstance(upload_result, dict) else ""
+                                        upload_id = upload_result["id"] if isinstance(upload_result, dict) else upload_result
+                                        if not img_url:
+                                            # Fallback: fetch URL from API
+                                            media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
+                                            img_url = media_info.get("source_url")
                                         if img_url:
                                             image_urls.append(img_url)
                                             media_ids.append(upload_id)
@@ -1067,10 +1325,13 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                 await context.bot.send_photo(chat_id=chat_id, photo=img_data, caption=f"🖼️ 为博客生成的第 {i+1} 张图片")
                                 
                                 # Upload ONLY the bytes that were just saved to workspace
-                                upload_id = await asyncio.to_thread(wp.upload_media, img_data, filename)
-                                # Fetch public URL
-                                media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
-                                img_url = media_info.get("source_url")
+                                upload_result = await asyncio.to_thread(wp.upload_media, img_data, filename)
+                                img_url = upload_result.get("source_url", "") if isinstance(upload_result, dict) else ""
+                                upload_id = upload_result["id"] if isinstance(upload_result, dict) else upload_result
+                                if not img_url:
+                                    # Fallback: fetch URL from API
+                                    media_info = requests.get(f"{wp_url}/media/{upload_id}", auth=wp.auth).json()
+                                    img_url = media_info.get("source_url")
                                 
                                 if img_url:
                                     image_urls.append(img_url)
@@ -1113,7 +1374,30 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         "Also generate 5-8 relevant tags for SEO. Include both Chinese and English tags if appropriate.\n"
                     )
                     
-                    if prior_content:
+                    if user_verbatim_content:
+                        # === USER PROVIDED FULL BLOG TEXT — FORMAT ONLY, NO REWRITING ===
+                        blog_system_prompt = (
+                            "You are a WordPress Gutenberg block formatter. "
+                            "Output exclusively in JSON format: {\"title\": \"...\", \"content\": \"Gutenberg block content\", \"tags\": [\"tag1\", \"tag2\", ...]}. "
+                            "ABSOLUTE RULES — VIOLATION IS UNACCEPTABLE:\n"
+                            "1. You MUST use the user's provided text VERBATIM. Do NOT rewrite, rephrase, summarize, expand, or change ANY wording.\n"
+                            "2. Your ONLY job is to convert the Markdown/plain text into WordPress Gutenberg block format.\n"
+                            "3. Extract the title from the first heading (# line). If no # heading, use the first line as title.\n"
+                            "4. Convert each paragraph to <!-- wp:paragraph --><p>text</p><!-- /wp:paragraph -->\n"
+                            "5. Convert headings to <!-- wp:heading --><h2>text</h2><!-- /wp:heading --> (or h3, h4 as appropriate)\n"
+                            "6. Convert numbered/bulleted lists to <!-- wp:list --> blocks\n"
+                            "7. Preserve ALL original text, emoji, formatting (bold with <strong>, etc.)\n"
+                            "8. Insert provided images at logical section breaks using Gutenberg image blocks.\n"
+                            "9. Generate 5-8 SEO tags based on the content.\n"
+                            "10. REPEAT: DO NOT ADD, REMOVE, OR MODIFY ANY OF THE USER'S WORDS."
+                        )
+                        blog_user_prompt = (
+                            f"Convert the following blog text to Gutenberg blocks. DO NOT change any wording:\n\n"
+                            f"{user_verbatim_content}\n\n"
+                            f"Available Images (Insert at logical section breaks):\n{urls_list_str}\n\n"
+                            f"REMINDER: Preserve the user's original text word-for-word. Only convert format to Gutenberg blocks."
+                        )
+                    elif prior_content:
                         # === USE PRIOR CONTENT (translation / search results) ===
                         blog_system_prompt = (
                             "You are an expert blog formatter. "
@@ -1151,7 +1435,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                             f"{media_context}\n\n"
                             f"Available Images (Embed ALL of these at logical points in the article):\n{urls_list_str}\n\n"
                             f"IMPORTANT: Use ONLY the URLs above for images. Write the blog following the user's instructions. "
-                            f"Refer to the uploaded photos naturally in the text (e.g. '\u5982\u56fe\u6240\u793a', '\u8fd9\u5f20\u7167\u7247\u4e2d', etc.)."
+                            f"Refer to the uploaded photos naturally in the text (e.g. '如图所示', '这张照片中', etc.)."
                         )
                     else:
                         # === FALLBACK: Generate from scratch ===
@@ -1224,7 +1508,10 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         featured_media_id=featured_id
                     )
                     
-                    link = post_data.get('link')
+                    post_id = post_data.get('id')
+                    # Use ?p=ID shortlink — slug-based permalinks break with Chinese/emoji titles
+                    site_base = wp_url.split('/wp-json')[0] if '/wp-json' in wp_url else wp_url
+                    link = f"{site_base}/?p={post_id}" if post_id else post_data.get('link', 'N/A')
                     tag_info = f"，标签: {', '.join(auto_tags[:5])}" if auto_tags else ""
                     cat_info = f"，分类: {user_category}" if user_category else ""
                     await context.bot.send_message(chat_id=chat_id, text=f"✅ 博客发布成功（包含 {len(image_urls)} 张图片{tag_info}{cat_info}）！\n🔗 {link}")
