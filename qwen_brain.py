@@ -282,7 +282,7 @@ class QwenBrain:
         if not retrieved_memories:
             return ""
         
-        return "\n".join([f"- {m}" for retrieved_memories])
+        return "\n".join([f"- {m}" for m in retrieved_memories])
 
     def filter_memories(self, user_text: str, candidate_memories: list) -> list:
         """
