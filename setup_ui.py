@@ -234,6 +234,16 @@ HTML_TEMPLATE = """
                         <div style="height: 5px;"></div>
                         <input type="password" name="TTS_API_KEY" placeholder="专用 API Key (可选)" value="__TTS_API_KEY__">
                     </div>
+
+                    <div class="advanced-group">
+                        <label>MeTube 服务地址</label>
+                        <input type="text" name="METUBE_URL" placeholder="http://localhost:8081" value="__METUBE_URL__">
+                    </div>
+
+                    <div class="advanced-group">
+                        <label>MeTube 本地/共享下载目录</label>
+                        <input type="text" name="METUBE_DOWNLOAD_DIR" placeholder="如: \\\\192.168.1.28\\LaCie\\..." value="__METUBE_DOWNLOAD_DIR__">
+                    </div>
                 </div>
             </details>
 
@@ -337,6 +347,8 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             html = html.replace('__VIDEO_API_KEY__', env_data.get('VIDEO_API_KEY', ''))
             html = html.replace('__TTS_MODEL_NAME__', env_data.get('TTS_MODEL_NAME', ''))
             html = html.replace('__TTS_API_KEY__', env_data.get('TTS_API_KEY', ''))
+            html = html.replace('__METUBE_URL__', env_data.get('METUBE_URL', 'http://localhost:8081'))
+            html = html.replace('__METUBE_DOWNLOAD_DIR__', env_data.get('METUBE_DOWNLOAD_DIR', ''))
 
             self.wfile.write(html.encode('utf-8'))
         elif self.path.startswith('/api/models'):
@@ -412,7 +424,13 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             if tts_model: env_content += f"TTS_MODEL_NAME={tts_model}\n"
             if tts_api: env_content += f"TTS_API_KEY={tts_api}\n"
 
-            env_content += "METUBE_URL=http://localhost:8081\n"
+            metube_url = params.get('METUBE_URL', ['http://localhost:8081'])[0]
+            if not metube_url: metube_url = "http://localhost:8081"
+            env_content += f"METUBE_URL={metube_url}\n"
+            
+            metube_dir = params.get('METUBE_DOWNLOAD_DIR', [''])[0]
+            if metube_dir: env_content += f"METUBE_DOWNLOAD_DIR={metube_dir}\n"
+
             env_content += "WP_URL=https://your-wordpress-site.com\n"
             env_content += "WP_USER=admin\n"
             env_content += "WP_PASSWORD=your_app_password\n"

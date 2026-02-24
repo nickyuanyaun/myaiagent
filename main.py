@@ -635,6 +635,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['pending_action'] = None
             # Fall through to process the new text normally.
 
+    user = update.message.from_user
     user_input = update.message.text
     if not user_input: return
     
@@ -2314,8 +2315,8 @@ if __name__ == '__main__':
         metube_client = MeTubeClient()
         
         print("Initializing File Watcher...")
-        # SMB Path provided by user
-        smb_path = r"\\192.168.1.28\LaCie\Projects\metube\downloads"
+        # SMB Path provided by user or environment
+        smb_path = os.environ.get("METUBE_DOWNLOAD_DIR", r"\\192.168.1.28\LaCie\Projects\metube\downloads")
         file_watcher = FileWatcher(watch_dir=smb_path)
     except Exception as e:
         print(f"Failed to init components: {e}")
