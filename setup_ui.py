@@ -182,20 +182,20 @@ HTML_TEMPLATE = """
         <form action="/save" method="POST">
             <div class="form-group">
                 <label>Telegram Bot Token (@BotFather)</label>
-                <input type="password" name="TG_TOKEN" placeholder="例如: 123456789:ABCDEF..." required>
+                <input type="password" name="TG_TOKEN" placeholder="例如: 123456789:ABCDEF..." value="__TG_TOKEN__" required>
             </div>
             
             <div class="form-group">
                 <label>Google Gemini API Key</label>
                 <div class="row">
-                    <input type="password" id="api_key" name="GOOGLE_KEY" placeholder="您的 Gemini Pro API 密钥" required>
+                    <input type="password" id="api_key" name="GOOGLE_KEY" placeholder="您的 Gemini Pro API 密钥" value="__GOOGLE_KEY__" required>
                     <button type="button" onclick="fetchModels()">获取模型</button>
                 </div>
             </div>
 
             <div class="form-group">
                 <label>AI 原生模型选择 (需先填写 API Key)</label>
-                <input type="text" id="model_input" name="GEMINI_MODEL" list="model_list" placeholder="选择或填写 (默认: gemini-2.5-flash)" value="gemini-2.5-flash">
+                <input type="text" id="model_input" name="GEMINI_MODEL" list="model_list" placeholder="选择或填写 (默认: gemini-2.5-flash)" value="__GEMINI_MODEL__">
                 <datalist id="model_list">
                     <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                     <option value="gemini-2.5-pro">gemini-2.5-pro</option>
@@ -206,7 +206,7 @@ HTML_TEMPLATE = """
             
             <div class="form-group">
                 <label>您的 Telegram User ID (管理员)</label>
-                <input type="text" name="USER_ID" placeholder="例如: 8526935699" required>
+                <input type="text" name="USER_ID" placeholder="例如: 8526935699" value="__USER_ID__" required>
             </div>
 
             <details>
@@ -216,23 +216,23 @@ HTML_TEMPLATE = """
                     
                     <div class="advanced-group">
                         <label>图像生成模型 (Image Model)</label>
-                        <input type="text" name="IMAGE_MODEL_NAME" placeholder="如: gemini-3-pro-image-preview">
+                        <input type="text" name="IMAGE_MODEL_NAME" placeholder="如: gemini-3-pro-image-preview" value="__IMAGE_MODEL_NAME__">
                         <div style="height: 5px;"></div>
-                        <input type="password" name="IMAGE_API_KEY" placeholder="专用 API Key (可选)">
+                        <input type="password" name="IMAGE_API_KEY" placeholder="专用 API Key (可选)" value="__IMAGE_API_KEY__">
                     </div>
 
                     <div class="advanced-group">
                         <label>视频生成模型 (Video Model)</label>
-                        <input type="text" name="VIDEO_MODEL_NAME" placeholder="如: sora-v1, veo-2.0">
+                        <input type="text" name="VIDEO_MODEL_NAME" placeholder="如: sora-v1, veo-2.0" value="__VIDEO_MODEL_NAME__">
                         <div style="height: 5px;"></div>
-                        <input type="password" name="VIDEO_API_KEY" placeholder="专用 API Key (可选)">
+                        <input type="password" name="VIDEO_API_KEY" placeholder="专用 API Key (可选)" value="__VIDEO_API_KEY__">
                     </div>
 
                     <div class="advanced-group">
                         <label>语音合成模型 (TTS Model)</label>
-                        <input type="text" name="TTS_MODEL_NAME" placeholder="如: eleven-turbo-v2">
+                        <input type="text" name="TTS_MODEL_NAME" placeholder="如: eleven-turbo-v2" value="__TTS_MODEL_NAME__">
                         <div style="height: 5px;"></div>
-                        <input type="password" name="TTS_API_KEY" placeholder="专用 API Key (可选)">
+                        <input type="password" name="TTS_API_KEY" placeholder="专用 API Key (可选)" value="__TTS_API_KEY__">
                     </div>
                 </div>
             </details>
@@ -315,7 +315,30 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+            
+            # Read current values if .env exists
+            env_data = {}
+            if os.path.exists(ENV_FILE):
+                with open(ENV_FILE, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            k, v = line.split('=', 1)
+                            env_data[k] = v.strip().strip('"\'')
+            
+            html = HTML_TEMPLATE
+            html = html.replace('__TG_TOKEN__', env_data.get('TELEGRAM_BOT_TOKEN', ''))
+            html = html.replace('__GOOGLE_KEY__', env_data.get('GOOGLE_API_KEY', ''))
+            html = html.replace('__GEMINI_MODEL__', env_data.get('GEMINI_MODEL_NAME', 'gemini-2.5-flash'))
+            html = html.replace('__USER_ID__', env_data.get('ALLOWED_USER_IDS', ''))
+            html = html.replace('__IMAGE_MODEL_NAME__', env_data.get('IMAGE_MODEL_NAME', ''))
+            html = html.replace('__IMAGE_API_KEY__', env_data.get('IMAGE_API_KEY', ''))
+            html = html.replace('__VIDEO_MODEL_NAME__', env_data.get('VIDEO_MODEL_NAME', ''))
+            html = html.replace('__VIDEO_API_KEY__', env_data.get('VIDEO_API_KEY', ''))
+            html = html.replace('__TTS_MODEL_NAME__', env_data.get('TTS_MODEL_NAME', ''))
+            html = html.replace('__TTS_API_KEY__', env_data.get('TTS_API_KEY', ''))
+
+            self.wfile.write(html.encode('utf-8'))
         elif self.path.startswith('/api/models'):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
