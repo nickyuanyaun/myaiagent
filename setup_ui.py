@@ -45,7 +45,9 @@ HTML_TEMPLATE = """
             align-items: center;
             justify-content: center;
             min-height: 100vh;
-            overflow: hidden;
+            overflow-y: auto;
+            padding: 2rem 0;
+            box-sizing: border-box;
         }
 
         .container {
