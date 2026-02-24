@@ -5,3 +5,4 @@ ddgs
 duckduckgo-search
 pillow
 requests
+croniter
