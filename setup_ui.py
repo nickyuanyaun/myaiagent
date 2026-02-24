@@ -132,6 +132,46 @@ HTML_TEMPLATE = """
             box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
         }
         .help-text { font-size: 0.8rem; color: var(--text-dim); margin-top: 5px; }
+
+        details {
+            margin-top: 2rem;
+            margin-bottom: 2rem;
+            background: rgba(15, 23, 42, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        summary {
+            padding: 1rem;
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-dim);
+            user-select: none;
+            transition: all 0.3s ease;
+        }
+
+        summary:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text);
+        }
+
+        .details-content {
+            padding: 1.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .advanced-group {
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+        }
+
+        .advanced-group:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
     </style>
 </head>
 <body>
@@ -168,6 +208,34 @@ HTML_TEMPLATE = """
                 <label>您的 Telegram User ID (管理员)</label>
                 <input type="text" name="USER_ID" placeholder="例如: 8526935699" required>
             </div>
+
+            <details>
+                <summary>高级设置 (点击展开) - 覆盖默认全局模型/API</summary>
+                <div class="details-content">
+                    <p class="help-text" style="margin-bottom: 15px;">留空则使用上方的全局设置。</p>
+                    
+                    <div class="advanced-group">
+                        <label>图像生成模型 (Image Model)</label>
+                        <input type="text" name="IMAGE_MODEL_NAME" placeholder="如: gemini-3-pro-image-preview">
+                        <div style="height: 5px;"></div>
+                        <input type="password" name="IMAGE_API_KEY" placeholder="专用 API Key (可选)">
+                    </div>
+
+                    <div class="advanced-group">
+                        <label>视频生成模型 (Video Model)</label>
+                        <input type="text" name="VIDEO_MODEL_NAME" placeholder="如: sora-v1, veo-2.0">
+                        <div style="height: 5px;"></div>
+                        <input type="password" name="VIDEO_API_KEY" placeholder="专用 API Key (可选)">
+                    </div>
+
+                    <div class="advanced-group">
+                        <label>语音合成模型 (TTS Model)</label>
+                        <input type="text" name="TTS_MODEL_NAME" placeholder="如: eleven-turbo-v2">
+                        <div style="height: 5px;"></div>
+                        <input type="password" name="TTS_API_KEY" placeholder="专用 API Key (可选)">
+                    </div>
+                </div>
+            </details>
 
             <button type="submit">保存并开启 AI 助手</button>
         </form>
@@ -300,11 +368,27 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             user_id = params.get('USER_ID', [''])[0]
             gemini_model = params.get('GEMINI_MODEL', ['gemini-2.5-flash'])[0]
 
+            # Advanced extraction
+            image_model = params.get('IMAGE_MODEL_NAME', [''])[0]
+            image_api = params.get('IMAGE_API_KEY', [''])[0]
+            video_model = params.get('VIDEO_MODEL_NAME', [''])[0]
+            video_api = params.get('VIDEO_API_KEY', [''])[0]
+            tts_model = params.get('TTS_MODEL_NAME', [''])[0]
+            tts_api = params.get('TTS_API_KEY', [''])[0]
+
             # Write .env file
             env_content = f"TELEGRAM_BOT_TOKEN={tg_token}\n"
             env_content += f"ALLOWED_USER_IDS={user_id}\n"
             env_content += f"GOOGLE_API_KEY={google_key}\n"
             env_content += f"GEMINI_MODEL_NAME={gemini_model}\n"
+            
+            if image_model: env_content += f"IMAGE_MODEL_NAME={image_model}\n"
+            if image_api: env_content += f"IMAGE_API_KEY={image_api}\n"
+            if video_model: env_content += f"VIDEO_MODEL_NAME={video_model}\n"
+            if video_api: env_content += f"VIDEO_API_KEY={video_api}\n"
+            if tts_model: env_content += f"TTS_MODEL_NAME={tts_model}\n"
+            if tts_api: env_content += f"TTS_API_KEY={tts_api}\n"
+
             env_content += "METUBE_URL=http://localhost:8081\n"
             env_content += "WP_URL=https://your-wordpress-site.com\n"
             env_content += "WP_USER=admin\n"

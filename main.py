@@ -40,6 +40,17 @@ ALLOWED_USER_IDS = [int(uid.strip()) for uid in ALLOWED_USER_IDS_STR.split(",") 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 METUBE_URL = os.environ.get("METUBE_URL", "http://localhost:8081")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+
+# Specialized Models & API Keys (Fallback to Global defaults)
+IMAGE_MODEL_NAME = os.environ.get("IMAGE_MODEL_NAME", "gemini-3.0-pro-preview")
+IMAGE_API_KEY = os.environ.get("IMAGE_API_KEY", GOOGLE_API_KEY)
+
+VIDEO_MODEL_NAME = os.environ.get("VIDEO_MODEL_NAME", "veo-2.0")
+VIDEO_API_KEY = os.environ.get("VIDEO_API_KEY", GOOGLE_API_KEY)
+
+TTS_MODEL_NAME = os.environ.get("TTS_MODEL_NAME", "eleven-turbo-v2")
+TTS_API_KEY = os.environ.get("TTS_API_KEY", GOOGLE_API_KEY)
+
 MAX_CONTEXT_MESSAGES = 20
 
 # Initialize Google GenAI Client
