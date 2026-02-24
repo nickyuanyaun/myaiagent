@@ -229,6 +229,7 @@ class QwenBrain:
         - DATA PIPELINE: If user asks to translate/summarize and save/publish the result, NEVER invent instructions. Instead, ALWAYS set `"source_content": "prior_tasks"` in blog_write_draft and `"content": "prior_tasks"` in file_write to pipe the original data accurately without hallucination.
         - NEVER create an image_generation task when user says to use their uploaded images for the blog post.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
+        - **SELF-DIAGNOSIS**: If the User input or the execution log contains a `[System Error]` or `[Execution Error]`, you MUST read the exact error traceback/message provided, figure out what went wrong with the previous task, and EXPLAIN the root cause and a proposed solution to the user in natural language (alongside any new tasks). DO NOT ignore system errors.
         """
         
         try:

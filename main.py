@@ -62,7 +62,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ... (omitted parts) ...
+# --- Agent Error Logger (For Antigravity/Self-Diagnosis) ---
+agent_error_logger = logging.getLogger("AgentErrors")
+agent_error_logger.setLevel(logging.ERROR)
+# Write errors to a dedicated file in the current directory
+error_file_handler = logging.FileHandler("agent_errors.log", encoding='utf-8')
+error_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+error_file_handler.setFormatter(error_formatter)
+agent_error_logger.addHandler(error_file_handler)
+
+def log_agent_error(error_msg: str, exception: Exception = None):
+    """Helper to consistently log AI-driven execution errors."""
+    import traceback
+    full_err = error_msg
+    if exception:
+        full_err += f"\nException: {str(exception)}\nTraceback: {traceback.format_exc()}"
+    agent_error_logger.error(full_err)
+    return full_err
+
+# --- Environment & API Keys ---
 
 def generate_image_native(prompt: str, negative_prompt: str = None, count: int = 1) -> list[bytes]:
     """
@@ -388,7 +406,7 @@ def fetch_url_content(url, extract_images=False):
         html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.IGNORECASE)
-        html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<footer>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
         
         # Convert common block elements to newlines
         html = re.sub(r'<br\s*/?\s*>', '\n', html, flags=re.IGNORECASE)
@@ -566,13 +584,46 @@ async def process_media_group(context, chat_id, media_group_id, update):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for Text messages."""
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    
-    if user.id not in ALLOWED_USER_IDS:
-        await context.bot.send_message(chat_id=chat_id, text="Sorry, you are not authorized.")
+    """Handle incoming text messages."""
+    user_id = update.message.from_user.id
+    if user_id not in ALLOWED_USER_IDS:
+        logger.warning(f"Unauthorized access attempt from user: {user_id}")
         return
+
+    chat_id = update.effective_chat.id
+    user_text = update.message.text
+    
+    # 1. Check for Pending Safety Confirmations
+    if 'pending_action' in context.user_data and context.user_data['pending_action']:
+        pending = context.user_data['pending_action']
+        if user_text.strip().lower() in ["确认", "confirm"]:
+            # User confirmed the dangerous action
+            await context.bot.send_message(chat_id=chat_id, text=f"🔐 收到确认指令。正在恢复执行被暂停的操作...")
+            
+            # Execute the stored create_plugin logic explicitly here
+            if pending.get("type") == "create_plugin":
+                plugin_name = pending.get("plugin_name")
+                code = pending.get("code")
+                await context.bot.send_message(chat_id=chat_id, text=f"⚙️ 正在为您编写并挂载高危插件: `{plugin_name}.py`...")
+                saved = await asyncio.to_thread(plugin_manager.write_plugin, plugin_name, code)
+                if saved:
+                    await context.bot.send_message(chat_id=chat_id, text=f"✅ 插件 `{plugin_name}` 已强行加载并就绪！")
+                    log_entry = f"[System] Dangerous plugin {plugin_name} created after user confirmation."
+                    if 'history' in context.user_data:
+                        context.user_data['history'].append({"role": "system", "content": log_entry})
+                else:
+                    error_str = log_agent_error(f"Failed to write dangerous plugin '{plugin_name}' to disk.")
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ 插件 `{plugin_name}` 保存失败。")
+            
+            # Clear pending state
+            context.user_data['pending_action'] = None
+            return # Don't process this "确认" as a new AI prompt
+            
+        else:
+            # User sent something else while an action is pending
+            await context.bot.send_message(chat_id=chat_id, text=f"🛑 操作已取消。之前的插件挂载请求已被丢弃。")
+            context.user_data['pending_action'] = None
+            # Fall through to process the new text normally.
 
     user_input = update.message.text
     if not user_input: return
@@ -1237,9 +1288,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         # Let's check `blog_media_store` count.
                         media_store_images = []
                         if blog_media_store and blog_media_store.get_media_count(chat_id) > 0:
-                             # If we have them, let's use them? Qwen explicitly handles `use_uploaded_media` flag 
-                             # but that was in `wordpress_post`. In split flow, we might lose that flag.
-                             # Heuristic: If we have stored media, use it.
+                             # If we have them, let's use them.
                              media_store_images = blog_media_store.get_media(chat_id)
                         
                         # Client call — read credentials from env vars
@@ -1420,14 +1469,25 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
 
             # --- File Write ---
             elif task_type == "file_write":
-                filename = task_payload.get("filename")
+                file_path = task_payload.get("file_path")
                 content = task_payload.get("content", "")
                 instructions = task_payload.get("instructions", "")
-                if filename:
+                
+                # 0. Core File Protection
+                core_files = ["main.py", "qwen_brain.py", "plugin_manager.py"]
+                if any(file_path.endswith(core) for core in core_files):
+                    error_str = log_agent_error(f"Security Alert: Attempted to overwrite core system file '{file_path}'. Operation blocked.")
+                    execution_log.append(f"[System Error] {error_str}")
+                    success = False
+                    error_msg = f"Cannot modify core file {file_path}. This is strictly prohibited to prevent the agent from breaking itself."
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚠️ {error_msg}")
+                    continue
+
+                if file_path:
                     try:
                         # 1. Generate content if instructions are provided
                         if instructions and content != "prior_tasks":
-                            await context.bot.send_message(chat_id=chat_id, text=f"✍️ 正在生成文件内容: {filename}...")
+                            await context.bot.send_message(chat_id=chat_id, text=f"✍️ 正在生成文件内容: {file_path}...")
                             
                             history_context = ""
                             if 'history' in context.user_data:
@@ -1666,22 +1726,38 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # 2. Safety Check (Heuristic)
                     dangerous_keywords = ["rm -rf", "shutil.rmtree('/')", "os.remove", "format C:", "del /s"]
                     if any(kw in code for kw in dangerous_keywords):
-                        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ **安全警告**: 发现该插件包含敏感操作代码。请确认是否允许挂载并执行？(回复“确认”继续)")
-                        # Wait for user confirmation (simplified: wait for next message in this conversation context if needed, 
-                        # but for now we follow the general instruction to be alert).
-                        # In a real bot, we'd set a state and wait. For this demo, let's proceed with a logger warning.
-                        logger.warning(f"DANGEROUS CODE DETECTED in plugin {plugin_name}: {code[:200]}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ **安全警告**: 发现该插件包含潜在高危操作代码 (如删除文件)。\n为防止意外，系统已暂停执行。请您仔细检查您的指令。\n\n如确认无误允许挂载，请直接回复：“**确认**” 或 “**confirm**”。")
+                        logger.warning(f"DANGEROUS CODE DETECTED in plugin {plugin_name} (Paused for confirmation): {code[:200]}")
+                        
+                        # Store the pending action in context
+                        context.user_data['pending_action'] = {
+                            "type": "create_plugin",
+                            "plugin_name": plugin_name,
+                            "code": code,
+                            "dependencies": dependencies
+                        }
+                        
+                        # Stop processing further tasks in this batch
+                        success = False
+                        error_msg = f"Plugin '{plugin_name}' execution paused for user safety confirmation."
+                        execution_log.append(f"[System] {error_msg}")
+                        break # Exit the task loop
 
+                    # 3. Normal Plugin Writing and Execution
                     await context.bot.send_message(chat_id=chat_id, text=f"⚙️ 正在为您编写并挂载新插件: `{plugin_name}.py`...")
                     saved = await asyncio.to_thread(plugin_manager.write_plugin, plugin_name, code)
                     if saved:
                         await context.bot.send_message(chat_id=chat_id, text=f"✅ 插件 `{plugin_name}` 已成功加载，我可以立即使用它了！")
                         execution_log.append(f"[System] Plugin {plugin_name} created with dependencies {dependencies} and hot-reloaded.")
                     else:
+                        error_str = log_agent_error(f"Failed to write plugin '{plugin_name}' to disk.")
+                        execution_log.append(f"[System Error] {error_str}")
                         success = False
                         error_msg = "Failed to write plugin code to disk."
                         await context.bot.send_message(chat_id=chat_id, text=f"❌ 插件 `{plugin_name}` 保存失败。")
                 else:
+                    error_str = log_agent_error("Missing plugin name, code, or PluginManager not initialized for create_plugin task.")
+                    execution_log.append(f"[System Error] {error_str}")
                     success = False
                     error_msg = "Missing plugin name, code, or PluginManager not initialized."
 
