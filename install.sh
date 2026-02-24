@@ -73,30 +73,14 @@ else
     echo -e "${RED}Warning: requirements.txt not found!${NC}"
 fi
 
-# 5. Interactive Configuration (.env Setup)
-echo -e "${YELLOW}[5/5] Configuring environment variables...${NC}"
+# 5. Web-based Configuration Setup
+echo -e "${YELLOW}[5/5] Launching Configuration Web UI...${NC}"
 
 if [ -f ".env" ]; then
     echo -e "${GREEN}.env file already exists. Skipping configuration.${NC}"
 else
-    echo -e "${CYAN}Let's set up your API keys.${NC}"
-    echo -e "(You can find your Telegram token from @BotFather, and Gemini key from Google AI Studio)"
-    echo ""
-    
-    read -p "Enter your Telegram Bot Token: " TG_TOKEN
-    read -p "Enter your Google Gemini API Key: " GOOGLE_KEY
-    read -p "Enter your Telegram User ID (e.g. 12345678): " USER_ID
-
-    cat << EOF > .env
-TELEGRAM_BOT_TOKEN=$TG_TOKEN
-ALLOWED_USER_IDS=$USER_ID
-GOOGLE_API_KEY=$GOOGLE_KEY
-METUBE_URL=http://localhost:8081
-WP_URL=https://your-wordpress-site.com
-WP_USER=admin
-WP_PASSWORD=your_app_password
-EOF
-    echo -e "${GREEN}.env configuration saved successfully!${NC}"
+    echo -e "${CYAN}Opening your browser for setup... (http://localhost:8080)${NC}"
+    python3 setup_ui.py
 fi
 
 # Finished!

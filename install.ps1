@@ -37,7 +37,8 @@ if (Test-Path $TargetDir) {
     Write-Host "Directory '$TargetDir' already exists. Updating..."
     Set-Location $TargetDir
     git pull
-} else {
+}
+else {
     git clone https://github.com/nickyuanyaun/myaiagent.git $TargetDir
     Set-Location $TargetDir
 }
@@ -49,7 +50,8 @@ Write-Host "[3/5] Setting up isolated Python environment..." -ForegroundColor Ye
 if (-not (Test-Path "venv")) {
     python -m venv venv
     Write-Host "Virtual environment created." -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "Virtual environment already exists." -ForegroundColor Green
 }
 
@@ -59,7 +61,8 @@ Write-Host "[4/5] Installing Python packages..." -ForegroundColor Yellow
 # Temporarily execute the activation script in the current process
 if (Test-Path "venv\Scripts\Activate.ps1") {
     . .\venv\Scripts\Activate.ps1
-} else {
+}
+else {
     Write-Host "Warning: Could not find venv activation script." -ForegroundColor Red
 }
 
@@ -67,35 +70,20 @@ python -m pip install --upgrade pip
 if (Test-Path "requirements.txt") {
     pip install -r requirements.txt
     Write-Host "Packages installed successfully." -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "Warning: requirements.txt not found!" -ForegroundColor Red
 }
 
-# 5. Interactive Configuration (.env Setup)
-Write-Host "[5/5] Configuring environment variables..." -ForegroundColor Yellow
+# 5. Web-based Configuration Setup
+Write-Host "[5/5] Launching Configuration Web UI..." -ForegroundColor Yellow
 
 if (Test-Path ".env") {
     Write-Host ".env file already exists. Skipping configuration." -ForegroundColor Green
-} else {
-    Write-Host "Let's set up your API keys." -ForegroundColor Cyan
-    Write-Host "(You can find your Telegram token from @BotFather, and Gemini key from Google AI Studio)`n"
-    
-    $TgToken = Read-Host "Enter your Telegram Bot Token"
-    $GoogleKey = Read-Host "Enter your Google Gemini API Key"
-    $UserId = Read-Host "Enter your Telegram User ID (e.g. 12345678)"
-
-    $EnvContent = @"
-TELEGRAM_BOT_TOKEN=$TgToken
-ALLOWED_USER_IDS=$UserId
-GOOGLE_API_KEY=$GoogleKey
-METUBE_URL=http://localhost:8081
-WP_URL=https://your-wordpress-site.com
-WP_USER=admin
-WP_PASSWORD=your_app_password
-"@
-    
-    Set-Content -Path ".env" -Value $EnvContent -Encoding UTF8
-    Write-Host ".env configuration saved successfully!" -ForegroundColor Green
+}
+else {
+    Write-Host "Opening your browser for setup... (http://localhost:8080)" -ForegroundColor Cyan
+    python setup_ui.py
 }
 
 # Finished!
