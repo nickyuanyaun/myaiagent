@@ -103,6 +103,7 @@ class QwenBrain:
                     "type": "create_plugin",
                     "plugin_name": "get_crypto_price",
                     "description": "Fetches current cryptocurrency prices",
+                    "dependencies": ["requests"],
                     "code": "..."
                 }},
                 {{
@@ -203,8 +204,10 @@ class QwenBrain:
 
         15. **create_plugin**:
            - Use when the user explicitly asks you to WRITE A SCRIPT to ADD A NEW CAPABILITY/FEATURE to yourself.
+           - **CRITICAL RULE**: If the request involves a specific third-party library or an API you are not 100% certain about (e.g. "Use the latest OpenAI SDK"), you **MUST** precede this with a `web_search` task in the SAME list to find documentation first.
            - 'plugin_name': Snake_case name of the plugin (e.g., "get_crypto_price").
            - 'description': Short description of what it does.
+           - 'dependencies': A list of pip package names required (e.g., ["requests", "beautifulsoup4"]). Leave empty if only standard libraries are used.
            - 'code': The raw Python code for the plugin.
              - MUST include a global dictionary `PLUGIN_METADATA = {{"description": "...", "args": {{"arg_name": "type"}}}}`.
              - MUST include a function `def execute(**kwargs):` that returns a string result.
