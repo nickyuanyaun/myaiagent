@@ -691,6 +691,61 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Document processing error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"文件处理失败: {e}")
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for Voice messages (Telegram native audio)."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    
+    if user.id not in ALLOWED_USER_IDS:
+        await context.bot.send_message(chat_id=chat_id, text="Sorry, you are not authorized.")
+        return
+
+    voice = update.message.voice
+    if not voice: return
+
+    logger.info(f"VOICE Received from {user.first_name}. Duration: {voice.duration}s")
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
+    try:
+        # 1. Download the .ogg file to memory
+        voice_file = await context.bot.get_file(voice.file_id)
+        file_buffer = io.BytesIO()
+        await voice_file.download_to_memory(file_buffer)
+        audio_bytes = file_buffer.getvalue()
+        
+        # 2. Transcribe using Google GenAI (Native Audio parsing)
+        await context.bot.send_message(chat_id=chat_id, text="🎙️ 正在识别语音...")
+        
+        # We use the standard model (gemini-2.5-flash) which supports multi-modal audio inputs
+        chat = genai_client.chats.create(model=GEMINI_MODEL_NAME)
+        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
+        transcription_prompt = "Please accurately transcribe the following audio message into text. Only return the transcribed text, nothing else. If it's Chinese, transcribe in Chinese. If it's English, in English."
+        
+        # Sync to async wrapper
+        def transcribe():
+            return chat.send_message([transcription_prompt, audio_part])
+            
+        transcribe_response = await asyncio.to_thread(transcribe)
+        user_input = transcribe_response.text.strip()
+        
+        if not user_input:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ 抱歉，我没有听清您说什么。")
+            return
+            
+        # Send back the transcription so the user knows what was heard
+        await context.bot.send_message(chat_id=chat_id, text=f"🗣️ 您说：{user_input}")
+        
+        # 3. Pass to exactly the same logic flow as text
+        if processing_lock.locked():
+             await context.bot.send_message(chat_id=chat_id, text="⏳ 前一名用户正在处理中，请稍候...")
+
+        async with processing_lock:
+            await process_agent_logic(context, chat_id, user_input, image_b64=None, update=update)
+            
+    except Exception as e:
+        logger.error(f"Voice processing error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"语音处理失败: {e}")
+
 async def update_agenda_msg(context, chat_id, agenda_msg_id, batch_id):
     """Updates the Telegram message with the current status of all tasks in a batch."""
     if not task_store or not agenda_msg_id: return
@@ -2183,9 +2238,10 @@ if __name__ == '__main__':
         # Explicit Handlers
         application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        application.add_handler(MessageHandler(filters.VOICE, handle_voice))
         application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
         
-        print("Agent is running with Explicit Vision Handlers! (Ctrl+C to stop)")
+        print("Agent is running with Explicit Vision, Voice, and File Handlers! (Ctrl+C to stop)")
         application.run_polling(drop_pending_updates=True)
     except KeyboardInterrupt:
         print("\nBot stopped by user. Goodbye!")
