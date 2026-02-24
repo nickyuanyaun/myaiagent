@@ -4,6 +4,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, List, Any
+from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
@@ -35,25 +36,39 @@ class TaskStore:
         except Exception as e:
             logger.error(f"Failed to save tasks: {e}")
 
-    def add_task(self, content: str, target_timestamp: str, chat_id: int, target_user: str = "me", batch_id: Optional[str] = None):
+    def add_task(self, content: str, target_timestamp: str, chat_id: int, target_user: str = "me", batch_id: Optional[str] = None, cron_expression: Optional[str] = None, is_actionable: bool = False, action_prompt: Optional[str] = None):
         """
         Adds a new reminder task.
         target_timestamp should be an ISO format string: YYYY-MM-DD HH:MM:SS
         """
+        target_time_str = target_timestamp
+        if cron_expression:
+            try:
+                # Calculate the first trigger time from now
+                now = datetime.now()
+                cron = croniter(cron_expression, now)
+                next_time = cron.get_next(datetime)
+                target_time_str = next_time.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                logger.error(f"Invalid cron expression {cron_expression}: {e}. Falling back to timestamp.")
+
         task: Dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "type": "reminder",
             "batch_id": batch_id,
             "content": content,
-            "target_timestamp": target_timestamp,
+            "target_timestamp": target_time_str,
             "chat_id": chat_id,
             "target_user": target_user,
+            "cron_expression": cron_expression,
+            "is_actionable": is_actionable,
+            "action_prompt": action_prompt,
             "status": "pending",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         self.tasks.append(task)
         self._save()
-        logger.info(f"Added reminder: {content} at {target_timestamp}")
+        logger.info(f"Added reminder: {content} at {target_time_str} (cron: {cron_expression})")
         return task
 
     def add_generic_task(self, task_type: str, payload: dict, chat_id: int, batch_id: Optional[str] = None):
@@ -97,7 +112,27 @@ class TaskStore:
         return [t for t in self.tasks if t["status"] == "pending"]
 
     def complete_task(self, task_id):
-        return self.update_task_status(task_id, "completed")
+        for task in self.tasks:
+            if task["id"] == task_id:
+                cron_expr = task.get("cron_expression")
+                if cron_expr:
+                    try:
+                        # Advance to next time
+                        now = datetime.now()
+                        cron = croniter(cron_expr, now)
+                        next_time = cron.get_next(datetime)
+                        task["target_timestamp"] = next_time.strftime("%Y-%m-%d %H:%M:%S")
+                        logger.info(f"Advanced recurring task {task_id} to {task['target_timestamp']}")
+                    except Exception as e:
+                        logger.error(f"Error calculating next cron for {task_id}: {e}")
+                        task["status"] = "completed"
+                else:
+                    task["status"] = "completed"
+                
+                task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save()
+                return True
+        return False
 
     def delete_task(self, task_id):
         self.tasks = [t for t in self.tasks if t["id"] != task_id]

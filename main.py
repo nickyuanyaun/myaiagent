@@ -444,14 +444,34 @@ async def check_tasks(context: ContextTypes.DEFAULT_TYPE):
             if now >= target_dt:
                 # Send the reminder
                 chat_id = task['chat_id']
-                content = f"⏰ 提醒 (来自过去): {task['content']}"
+                content = task['content']
+                target_user = task.get('target_user', 'me')
+                is_actionable = task.get('is_actionable', False)
+                action_prompt = task.get('action_prompt', '')
                 
-                # If target is not 'me', clarify who it's for/from logic if needed, 
-                # but for now let's keep it simple or reuse the stored content.
-                # In process_agent_logic we arguably already formatted the content? 
-                # Let's check. Yes, we formatted it.
-                
-                await context.bot.send_message(chat_id=chat_id, text=content)
+                if is_actionable and action_prompt:
+                    # Execute the workflow instead of just sending text
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚙️ 正在执行定时任务: {content}\n指令: {action_prompt}")
+                    asyncio.create_task(process_agent_logic(action_prompt, chat_id, context))
+                else:
+                    if target_user and target_user.lower() != 'me':
+                        other_chat_ids = [uid for uid in ALLOWED_USER_IDS if uid != chat_id]
+                        if other_chat_ids:
+                            target_chat_id = other_chat_ids[0]
+                            # Optional: Identify sender
+                            sender_name = "Nick" if chat_id == 8526935699 else "Fox" if chat_id == 1660122746 else str(chat_id)
+                            
+                            target_content = f"📩 收到来自 {sender_name} 的留言提醒:\n{content}"
+                            await context.bot.send_message(chat_id=target_chat_id, text=target_content)
+                            
+                            # Notify sender success
+                            await context.bot.send_message(chat_id=chat_id, text=f"✅ 已成功将消息发送给另一位用户。")
+                        else:
+                            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 无法找到其他接收者来发送你的消息。")
+                    else:
+                        msg_content = f"⏰ 提醒: {content}"
+                        await context.bot.send_message(chat_id=chat_id, text=msg_content)
+                    
                 logger.info(f"Executed task: {task['id']}")
                 
                 # Mark complete
@@ -902,10 +922,11 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             
             # --- Reminder ---
             elif task_type == "reminder":
-                content = task_payload.get("content")
-                time_str = task_payload.get("target_timestamp") # Qwen gives target_time, store uses target_timestamp
-                if not time_str: time_str = task_payload.get("target_time")
-                target_user = task_payload.get("target_user")
+                # Reminders store this data at the task root, not in the payload
+                content = task.get("content")
+                time_str = task.get("target_timestamp") 
+                if not time_str: time_str = task.get("target_time")
+                target_user = task.get("target_user")
                 
                 if content and time_str:
                     # Logic is already in task_store.add_task called in Phase 1.5

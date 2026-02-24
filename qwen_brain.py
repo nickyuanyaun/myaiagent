@@ -65,7 +65,16 @@ class QwenBrain:
                     "type": "reminder",
                     "content": "Check wallet",
                     "target_time": "YYYY-MM-DD HH:MM:SS",
-                    "target_user": "me"
+                    "target_user": "me",
+                    "is_actionable": False
+                }},
+                {{
+                    "type": "reminder",
+                    "content": "每天9点给我推送10条科技新闻",
+                    "cron_expression": "0 9 * * *",
+                    "target_user": "me",
+                    "is_actionable": True,
+                    "action_prompt": "推送10条科技新闻"
                 }},
                 {{
                     "type": "download",
@@ -105,9 +114,13 @@ class QwenBrain:
            - 'negative_prompt': Optional.
            
         4. **reminder**:
-           - Schedule a reminder or message.
-           - 'target_time': MUST be absolute YYYY-MM-DD HH:MM:SS. Calculate from "in 10 mins" etc.
+           - Schedule a reminder or a scheduled automated action.
+           - If it is a one-time reminder: use 'target_time', MUST be absolute YYYY-MM-DD HH:MM:SS. Calculate from "in 10 mins" etc.
+           - If it is a repeating/recurring schedule (e.g. "every day at 9am", "每天9点"): Use 'cron_expression' instead of 'target_time'.
+             - For 'cron_expression', use standard cron format (e.g. `0 9 * * *` for daily at 9am, `*/5 * * * *` for every 5 mins).
            - 'target_user': "me", "dad", "mom", "son", etc. default "me".
+           - 'is_actionable': Set to True ONLY IF the user wants the bot to automatically DO something at that time (like "推送新闻", "搜股票", "画张猫"). If the user just wants a simple text reminder to themselves ("提醒我喝水"), set this to False.
+           - 'action_prompt': If 'is_actionable' is True, provide the EXACT exact command you want the bot to run when the alarm triggers (e.g. "搜一下纳斯达克最新情况并总结"). If False, omit this field.
            
         5. **download**:
            - If user provides a video URL to save/download.

@@ -3,11 +3,17 @@ import asyncio
 from qwen_brain import QwenBrain
 import logging
 import json
+import os
+from google import genai
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 
 async def test_tasks():
-    brain = QwenBrain()
+    load_dotenv()
+    api_key = os.getenv("GOOGLE_API_KEY")
+    client = genai.Client(api_key=api_key)
+    brain = QwenBrain(client)
     
     scenarios = [
         "Draw a cyberpunk cat and post it to my blog with title 'Cyber Cat'",
