@@ -70,6 +70,19 @@ class QwenBrain:
                 {{
                     "type": "download",
                     "url": "https://youtube.com/..."
+                }},
+                {{
+                    "type": "file_write",
+                    "filename": "notes.txt",
+                    "instructions": "Write meeting notes about the new project..."
+                }},
+                {{
+                    "type": "send_file",
+                    "filename": "notes.txt"
+                }},
+                {{
+                    "type": "file_read",
+                    "filename": "notes.txt"
                 }}
             ]
         }}
@@ -113,16 +126,17 @@ class QwenBrain:
            - 'category': Category name if user specifies one.
            - 'source_content': 
              - "user_provided_content": User provides full text.
-             - "prior_tasks": Use content from search/translation.
+             - "prior_tasks": ALWAYS use this if the blog is based on a translation or search you just outputted in this same JSON list. Do NOT invent new instructions!
              - "user_instructions": User gives instruction (e.g. "Write about X").
            - CRITICAL AND NEW: If user says "Write and Publish", you MUST generate a sequence:
              1. `blog_write_draft` (to generate text)
-             2. `image_generation` (to generate cover image, unless user provided media)
+             2. `image_generation` (to generate 3 insert images for the blog: set 'count' to 3, unless user provided media)
              3. `blog_publish_draft` (to actually publish)
 
         8. **blog_publish_draft**:
            - Use when user wants to PUBLISH the currently drafted blog post.
-           - Usually follows `blog_write_draft` in the same list.
+           - CRITICAL RULE: This task CANNOT run alone if you haven't written the draft yet! 
+           - If the user says "publish this text as a blog" or "发博客", you MUST precede this with a `blog_write_draft` task in the SAME list. NEVER output `blog_publish_draft` by itself unless the user explicitly says "publish the draft we just made".
            - No arguments needed.
 
         9. **blog_media_save**:
@@ -136,10 +150,31 @@ class QwenBrain:
            - Use when user wants to clear/delete/reset all pending blog media images.
            - Keywords: "清空素材", "删除素材", "清空博客素材", "删除博客图片", "重置素材", "clear media", "reset blog media"
            - Return: {{"type": "blog_media_clear"}}
+           
+        11. **file_write**:
+           - Use when user asks to create, save, or write a file (like .txt, .md, .py, .js, .json, etc.) directly to disk.
+           - 'filename': The name of the file to save (e.g., "notes.md" or an absolute path like "Z:\\助理翻译\\notes.md"). It natively supports absolute paths and will create any missing folders automatically, so do NOT use `run_command` to move files.
+           - 'instructions': Describe what content should be GENERATED. Leave EMPTY if you are just pipelining prior task data.
+           - 'content': Set to "prior_tasks" if saving the output of a search or translation task. Otherwise, leave empty unless saving verbatim text.
+           
+        12. **send_file**:
+           - Use when user asks you to send them a file from your disk.
+           - 'filename': The name of the file to send.
+           
+        13. **file_read**:
+           - Use when user asks you to read or check the contents of a local file on your disk.
+           - 'filename': The name of the file to read.
+           
+        14. **run_command**:
+           - Use when the user specifically asks you to execute a terminal, shell, or PowerShell command.
+           - IMPORTANT FOR WINDOWS: Always use backslashes (`\\`) for folder paths, NOT forward slashes. ALWAYS wrap paths containing spaces or Chinese in double quotes (e.g. `"Z:\\我的文件夹\\file.txt"`). NEVER omit the backslash after a drive letter (use `"Z:\\"` NOT `"Z:"`).
+           - 'command': The exact command string to execute.
+           - 'timeout': (Optional) Maximum time in seconds to wait for the command to finish. Default is 30.
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.
         - Sort tasks logically: blog_media_save -> web_search -> translation -> blog_write_draft -> image_generation -> blog_publish_draft.
+        - DATA PIPELINE: If user asks to translate/summarize and save/publish the result, NEVER invent instructions. Instead, ALWAYS set `"source_content": "prior_tasks"` in blog_write_draft and `"content": "prior_tasks"` in file_write to pipe the original data accurately without hallucination.
         - NEVER create an image_generation task when user says to use their uploaded images for the blog post.
         - If no specific task is needed (just chat), return empty list: {{"tasks": []}}.
         """

@@ -75,7 +75,9 @@ class WordPressClient:
 
     def get_or_create_tag(self, tag_name):
         """Look up a tag by name, create it if it doesn't exist, return its ID."""
-        tag_name = tag_name.strip()
+        if not tag_name:
+            return None
+        tag_name = str(tag_name).strip()
         if not tag_name:
             return None
         try:
@@ -104,7 +106,9 @@ class WordPressClient:
 
     def get_or_create_category(self, cat_name):
         """Look up a category by name, create it if it doesn't exist, return its ID."""
-        cat_name = cat_name.strip()
+        if not cat_name:
+            return None
+        cat_name = str(cat_name).strip()
         if not cat_name:
             return None
         try:

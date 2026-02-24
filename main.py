@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
-from telegram import Update, InputMediaPhoto
+from telegram import Update, InputMediaPhoto as TGInputMediaPhoto
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from ddgs import DDGS
@@ -284,10 +284,75 @@ def search_web(query, time_limit=None):
         logger.error(f"Search error: {e}")
         return f"Error during search: {e}"
 
-def fetch_url_content(url):
-    """Fetch and extract the main text content from a URL."""
+from html.parser import HTMLParser
+from urllib.parse import urlparse, urljoin
+import os as os_lib
+
+class ImageExtractor(HTMLParser):
+    def __init__(self, base_url):
+        super().__init__()
+        self.base_url = base_url
+        self.images = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'img':
+            attrs_dict = dict(attrs)
+            src = attrs_dict.get('src')
+            if src:
+                # Ensure it's a full URL
+                absolute_url = urljoin(self.base_url, src)
+                self.images.append(absolute_url)
+
+def download_scraped_images(chat_id, image_urls, limit=5, store=None):
+    if not store: return 0
+    downloaded_count = 0
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    for img_url in image_urls[:limit*3]: # buffer in case some fail
+        if downloaded_count >= limit: break
+        try:
+            img_resp = requests.get(img_url, headers=headers, timeout=10)
+            if img_resp.status_code == 200 and 'image' in img_resp.headers.get('Content-Type', ''):
+                logger.info(f"Downloaded scraped image: {img_url}")
+                store.add_media(chat_id, img_resp.content)
+                downloaded_count += 1
+        except Exception as dl_e:
+            logger.warning(f"Failed to download image {img_url}: {dl_e}")
+    return downloaded_count
+
+def fetch_url_content(url, extract_images=False):
+    """Fetch and extract the main text content from a URL. Optionally returns tuple of (text, [img_urls])."""
     logger.info(f"Fetching full article content from: {url}")
     try:
+        # 1. Try markdown.download API to bypass JS-checks/Cloudflare and get clean markdown
+        try:
+            api_url = f"https://markdown.download/?url={url}"
+            md_resp = requests.get(api_url, timeout=30)
+            if md_resp.status_code == 200 and len(md_resp.text) > 200 and "Please enable JS" not in md_resp.text and "Cloudflare" not in md_resp.text:
+                text = md_resp.text
+                image_urls = []
+                if extract_images:
+                    import re
+                    # markdown format: ![alt](url)
+                    img_markdown = re.findall(r'!\[.*?\]\((.*?)\)', text)
+                    valid_urls = []
+                    for img_url in img_markdown:
+                        if img_url.startswith('http') and not img_url.lower().endswith('.svg'):
+                            valid_urls.append(img_url)
+                    # Remove duplicates
+                    seen = set()
+                    image_urls = [x for x in valid_urls if not (x in seen or seen.add(x))]
+                
+                if len(text) > 50000:
+                    text = text[:50000] + "\n\n[... article truncated ...]"
+                
+                logger.info(f"Fetched {len(text)} chars from {url} via markdown.download")
+                if extract_images:
+                    return text, image_urls
+                return text
+        except Exception as md_e:
+            logger.warning(f"markdown.download api failed: {md_e}")
+
+        # 2. Fallback to direct fetch
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -295,6 +360,21 @@ def fetch_url_content(url):
         response.raise_for_status()
         
         html = response.text
+        
+        image_urls = []
+        if extract_images:
+            parser = ImageExtractor(url)
+            parser.feed(html)
+            valid_urls = []
+            for img_url in parser.images:
+                parsed = urlparse(img_url)
+                ext = os_lib.path.splitext(parsed.path)[1].lower()
+                # Accept basic image extensions, skip icons/SVGs
+                if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                    valid_urls.append(img_url)
+            # Remove duplicates preserving order
+            seen = set()
+            image_urls = [x for x in valid_urls if not (x in seen or seen.add(x))]
         
         # Basic HTML to text extraction
         # Remove script and style elements
@@ -320,15 +400,18 @@ def fetch_url_content(url):
         lines = [line for line in lines if len(line) > 20]  # Filter short noise lines
         text = '\n\n'.join(lines)
         
-        # Limit to reasonable length (first ~8000 chars to stay within model context)
-        if len(text) > 8000:
-            text = text[:8000] + "\n\n[... article truncated ...]"
+        # Limit to reasonable length (first ~50000 chars to stay within model context for parsing)
+        if len(text) > 50000:
+            text = text[:50000] + "\n\n[... article truncated ...]"
         
         logger.info(f"Fetched {len(text)} chars of article content from {url}")
+        if extract_images:
+            return text, image_urls
         return text
         
     except Exception as e:
         logger.error(f"Failed to fetch URL content: {e}")
+        if extract_images: return f"Error fetching URL: {e}", []
         return f"Error fetching URL: {e}"
 
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
@@ -544,6 +627,49 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Photo processing error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"图片处理失败: {e}")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for Document (File) messages."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    
+    if user.id not in ALLOWED_USER_IDS:
+        await context.bot.send_message(chat_id=chat_id, text="Sorry, you are not authorized.")
+        return
+
+    document = update.message.document
+    if not document: return
+    
+    file_name = document.file_name.lower()
+    if not (file_name.endswith('.txt') or file_name.endswith('.md')):
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ 我目前只支持读取 .txt 和 .md 格式的文本文件。")
+        return
+
+    logger.info(f"DOCUMENT Received from {user.first_name}: {file_name}")
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
+    try:
+        # Download the file to memory
+        doc_file = await context.bot.get_file(document.file_id)
+        file_buffer = io.BytesIO()
+        await doc_file.download_to_memory(file_buffer)
+        
+        # Decode text content
+        file_content = file_buffer.getvalue().decode('utf-8')
+        
+        caption = update.message.caption if update.message.caption else "Please read this file."
+        user_input = f"[User sent a file named '{file_name}']\n\nContent:\n{file_content}\n\nUser Message: {caption}"
+        
+        # Acquire Lock (Enter Queue)
+        if processing_lock.locked():
+             await context.bot.send_message(chat_id=chat_id, text="⏳ 前一名用户正在处理中，请稍候...")
+
+        async with processing_lock:
+            await process_agent_logic(context, chat_id, user_input, image_b64=None, update=update)
+            
+    except Exception as e:
+        logger.error(f"Document processing error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"文件处理失败: {e}")
 
 async def update_agenda_msg(context, chat_id, agenda_msg_id, batch_id):
     """Updates the Telegram message with the current status of all tasks in a batch."""
@@ -804,6 +930,14 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
             
             # --- Image Generation ---
             elif task_type == "image_generation":
+                # Check if we already scraped original images into media store during this batch
+                if blog_media_store and blog_media_store.get_media_count(chat_id) > 0:
+                    logger.info("Skipping image_generation task because original scraped/uploaded images already exist.")
+                    execution_log.append("[System] Skipped generative image task because original media was already extracted or provided.")
+                    # Mark successful and skip generator
+                    success = True
+                    continue
+                    
                 prompt = task_payload.get("prompt")
                 neg_prompt = task_payload.get("negative_prompt")
                 count = task_payload.get("count", 1)
@@ -879,7 +1013,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                 for img_bytes in generated_images:
                                     # Update cache for future edits
                                     context.user_data['last_image_bytes'] = img_bytes
-                                    media_group.append(InputMediaPhoto(io.BytesIO(img_bytes)))
+                                    media_group.append(TGInputMediaPhoto(io.BytesIO(img_bytes)))
                                 
                                 await context.bot.send_media_group(chat_id=chat_id, media=media_group)
                                 execution_log.append(f"[System] Generated/Edited {len(generated_images)} images.")
@@ -904,13 +1038,33 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                 
                 # Use Qwen to write the content
                 try:
+                    # --- CRITICAL FIX: Proactively fetch Translation/Search context from execution_log ---
+                    prior_content = ""
+                    for entry in execution_log:
+                        if entry.startswith("[Translation Result]"):
+                            prior_content += entry.replace("[Translation Result]", "").strip() + "\n\n"
+                    if not prior_content:
+                        for entry in execution_log:
+                            if "Search Results" in entry:
+                                prior_content += entry + "\n\n"
+                    # Also include file read contents if we didn't find search or translation
+                    if not prior_content:
+                        for entry in execution_log:
+                            if "[System] Read file" in entry:
+                                prior_content += entry + "\n\n"
+                    
+                    # Force prior_tasks mode if we have pipelined data
+                    if prior_content and source_content != "user_provided_content":
+                        source_content = "prior_tasks"
+
                     # Construct prompt for the writer
                     writer_prompt = f"撰写一篇高质量的WordPress博客文章，主题: {topic}.\n\n"
                     writer_prompt += "重要: 默认使用中文撰写，除非用户在指令中明确指定了其他语言。\n\n"
                     if source_content == "user_provided_content":
-                        writer_prompt += f"需要排版的内容:\n{instructions}\n\n任务: 将以上内容排版为博客文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
-                    elif source_content == "prior_tasks":
-                         writer_prompt += f"上下文/指令:\n{instructions}\n\n任务: 撰写文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
+                        writer_prompt += f"需要排版的内容:\n{instructions}\n\n任务: 严格将以上内容排版为博客文章，保留原文核心意思。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
+                    elif source_content == "prior_tasks" and prior_content:
+                         writer_prompt = f"这是一项极端严格的排版任务。绝对不要自己无中生有编造博客或者缩减任何文字！\n这是一篇由前置工具（智能翻译或网络抓取）获取的准确文章全文:\n\n{prior_content[:50000]}\n\n"
+                         writer_prompt += f"附加指令: {instructions}\n\n指令优先级极高: 你现在的身份是一个『无情的打字复读机』。你只需要为以上文本想一个【吸睛标题】(title)，并【原封不动】地返回全文字字句句作为正文(content)！绝对不允许总结、缩减、或者重写任何一段文字！必须保留原文所有的字数和细节。仅返回有效JSON: {{'title': '吸睛标题', 'content': '全文一字不落的照抄'}}"
                     else:
                         writer_prompt += f"写作指令:\n{instructions}\n\n任务: 撰写一篇有创意、有深度的文章。仅返回有效JSON: {{'title': '标题', 'content': '正文内容'}}"
 
@@ -920,9 +1074,43 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # Let's use genai_client (Gemini) for writing as it's better at long form, or Qwen via ollama directly.
                     # Let's use Gemini for the writing part since it replaces the 'Nano Banana Pro' persona well.
                     
+                    # 1. Grab images to provide vision context
+                    vision_parts = []
+                    if blog_media_store and blog_media_store.get_media_count(chat_id) > 0:
+                        stored_media = blog_media_store.get_media(chat_id)
+                        for item in stored_media:
+                            if 'data' in item:
+                                vision_parts.append(
+                                    types.Part.from_bytes(
+                                        data=item['data'],
+                                        mime_type="image/jpeg"
+                                    )
+                                )
+                    
+                    # Also include images directly from this request if not already captured
+                    if image_b64:
+                        vision_parts.append(types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg"))
+                    if additional_images:
+                        for b64_img in additional_images:
+                            vision_parts.append(types.Part.from_bytes(data=base64.b64decode(b64_img), mime_type="image/jpeg"))
+
+                    # 2. Append recent chat context so the writer knows what the user actually wants
+                    history_context = ""
+                    if 'history' in context.user_data:
+                        history_context = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in context.user_data['history'][-10:]])
+                    
+                    if history_context:
+                        writer_prompt += f"\n\n--- 最近对话上下文 ---\n{history_context}\n----------------------\n请确保你的文章内容紧密贴合用户的最新要求和提供的上下文（尤其是紧密结合提供的图片内容进行分析）。"
+
+                    # 3. Combine text and vision parts
+                    contents_list = [writer_prompt]
+                    if vision_parts:
+                        contents_list.extend(vision_parts)
+                        logger.info(f"Injecting {len(vision_parts)} images into blog_write_draft context")
+
                     draft_resp = genai_client.models.generate_content(
-                        model="gemini-2.0-flash", # Use a text model
-                        contents=[writer_prompt],
+                        model="gemini-2.0-flash", # Use a multimodal model
+                        contents=contents_list,
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
                     
@@ -984,9 +1172,9 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         await context.bot.send_message(chat_id=chat_id, text="📐 正在使用AI排版博客内容...")
                         
                         post_url = client.create_post_unified(
-                            title=draft['title'],
-                            content=draft['content'],
-                            category_names=[draft['category']],
+                            title=draft.get('title', 'AI Update'),
+                            content=draft.get('content', ''),
+                            category_names=[draft.get('category')] if draft.get('category') else None,
                             generated_images=batch_images,
                             stored_media_images=media_store_images,
                             genai_client=genai_client,
@@ -1037,7 +1225,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     # Send Images
                     if images:
                         if len(images) > 1:
-                            media_group = [InputMediaPhoto(io.BytesIO(img_data), caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
+                            media_group = [TGInputMediaPhoto(io.BytesIO(img_data), caption=f"✨ {prompt[:50]}..." if i == 0 else None) for i, img_data in enumerate(images)]
                             await context.bot.send_media_group(chat_id=chat_id, media=media_group)
                         else:
                             await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption=f"✨ {prompt[:100]}...")
@@ -1063,14 +1251,20 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     
                     # PRIORITY 1: Fetch full article content directly from URL
                     source_material = ""
+                    image_urls = []
                     if source_url:
-                        await context.bot.send_message(chat_id=chat_id, text=f"📄 正在获取原文内容: {source_url}")
-                        fetched = await asyncio.to_thread(fetch_url_content, source_url)
+                        await context.bot.send_message(chat_id=chat_id, text=f"📄 正在获取原文内容和图片: {source_url}")
+                        fetched_res = await asyncio.to_thread(fetch_url_content, source_url, extract_images=True)
+                        if isinstance(fetched_res, tuple):
+                            fetched, image_urls = fetched_res
+                        else:
+                            fetched = fetched_res
+                        
                         if fetched and not fetched.startswith("Error"):
                             source_material = fetched
                             logger.info(f"Successfully fetched full article: {len(source_material)} chars")
                     
-                    # PRIORITY 2: If URL fetch failed, try to find URL from user message or search results
+                    # PRIORITY 2: If URL fetch failed, try to find URL from search results
                     if not source_material:
                         # Check if there's a URL in the execution log from web_search
                         for entry in execution_log:
@@ -1079,11 +1273,24 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                 import re as re_mod
                                 urls_found = re_mod.findall(r'Link:\s*(https?://\S+)', entry)
                                 if urls_found:
-                                    await context.bot.send_message(chat_id=chat_id, text=f"📄 从搜索结果获取原文...")
-                                    fetched = await asyncio.to_thread(fetch_url_content, urls_found[0])
+                                    await context.bot.send_message(chat_id=chat_id, text=f"📄 从搜索结果获取原文和图片...")
+                                    fetched_res = await asyncio.to_thread(fetch_url_content, urls_found[0], extract_images=True)
+                                    if isinstance(fetched_res, tuple):
+                                        fetched, image_urls = fetched_res
+                                    else:
+                                        fetched = fetched_res
+                                        
                                     if fetched and not fetched.startswith("Error"):
                                         source_material = fetched
                                         break
+                                        
+                    # Scrape and Download Translation Context Images
+                    if image_urls and blog_media_store:
+                        downloaded_count = await asyncio.to_thread(download_scraped_images, chat_id, image_urls, limit=5, store=blog_media_store)
+                        if downloaded_count > 0:
+                            execution_log.append(f"[System] Scraped and saved {downloaded_count} original images from source URL")
+                            await context.bot.send_message(chat_id=chat_id, text=f"✅ 成功提取了 {downloaded_count} 张原网页内插图！将自动配入博客。")
+                    
                     
                     # PRIORITY 3: Last resort - use search snippets (low quality)
                     if not source_material:
@@ -1110,7 +1317,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         trans_response = genai_client.models.generate_content(
                             model=GEMINI_MODEL_NAME,
                             contents=[translation_prompt],
-                            config=types.GenerateContentConfig(temperature=0.2)
+                            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192)
                         )
                         
                         translated_text = trans_response.text
@@ -1128,6 +1335,223 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     success = False
                     error_msg = str(e)
                     execution_log.append(f"[System] Translation failed: {e}")
+
+            # --- File Write ---
+            elif task_type == "file_write":
+                filename = task_payload.get("filename")
+                content = task_payload.get("content", "")
+                instructions = task_payload.get("instructions", "")
+                if filename:
+                    try:
+                        # 1. Generate content if instructions are provided
+                        if instructions and content != "prior_tasks":
+                            await context.bot.send_message(chat_id=chat_id, text=f"✍️ 正在生成文件内容: {filename}...")
+                            
+                            history_context = ""
+                            if 'history' in context.user_data:
+                                history_context = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in context.user_data['history'][-10:]])
+                                
+                            write_prompt = (
+                                f"Please write the complete content for a file named {filename}.\n\n"
+                                f"Instructions: {instructions}\n\n"
+                                f"--- Recent Conversation Context ---\n{history_context}\n"
+                                f"User's newest message: {user_input}\n"
+                                f"-----------------------------------\n\n"
+                                f"IMPORTANT: Generate the content based on the instructions while aligning perfectly with the provided conversation context (such as specific themes or characters discussed). "
+                                f"Return ONLY the exact, complete file content. "
+                                f"Do not include markdown code block wrappers (like ```md) around the entire output."
+                            )
+                            
+                            write_resp = await asyncio.to_thread(
+                                genai_client.models.generate_content,
+                                model=GEMINI_MODEL_NAME,
+                                contents=[write_prompt]
+                            )
+                            content = write_resp.text
+                            
+                            # Clean up potential markdown wrappers
+                            if content.startswith("```"):
+                                import re
+                                content = re.sub(r'^```[a-zA-Z0-9]*\n', '', content)
+                                content = re.sub(r'\n```$', '', content)
+                                content = content.strip()
+                                
+                        elif content == "prior_tasks":
+                            # Pull from translation or search
+                            extracted_content = ""
+                            for entry in execution_log:
+                                if entry.startswith("[Translation Result]"):
+                                    extracted_content += entry.replace("[Translation Result]", "", 1).strip() + "\n\n"
+                                elif "Search Results" in entry:
+                                    extracted_content += entry + "\n\n"
+                                elif "[System] Read file" in entry:
+                                    extracted_content += entry + "\n\n"
+                                    
+                            if not extracted_content:
+                                content = "Error: No prior translation, file read, or search tasks found to write."
+                            else:
+                                content = extracted_content.strip()
+
+                        # Handle absolute paths natively
+                        if os.path.isabs(filename):
+                            file_path = filename
+                            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                            safe_display_name = filename
+                        else:
+                            workspace_dir = "workspace"
+                            os.makedirs(workspace_dir, exist_ok=True)
+                            safe_name = os.path.basename(filename)
+                            file_path = os.path.join(workspace_dir, safe_name)
+                            safe_display_name = safe_name
+                        
+                        await context.bot.send_message(chat_id=chat_id, text=f"📝 正在写入文件: {safe_display_name}...")
+                        
+                        # Async file write
+                        def write_file():
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                        await asyncio.to_thread(write_file)
+                        
+                        execution_log.append(f"[System] Wrote {len(content)} chars to {safe_display_name}.")
+                        await context.bot.send_message(chat_id=chat_id, text=f"✅ 文件已保存: {safe_display_name} (共 {len(content)} 字符)")
+                    except Exception as e:
+                        logger.error(f"File Write Failed: {e}")
+                        success = False
+                        error_msg = str(e)
+                        execution_log.append(f"[System] Failed to write file {filename}: {e}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ 文件写入失败: {e}")
+                else:
+                    success = False
+                    error_msg = "No filename provided for file_write."
+
+            # --- Send File ---
+            elif task_type == "send_file":
+                filename = task_payload.get("filename")
+                if filename:
+                    try:
+                        workspace_dir = "workspace"
+                        safe_filename = os.path.basename(filename)
+                        file_path = os.path.join(workspace_dir, safe_filename)
+                        
+                        if os.path.exists(file_path):
+                            await context.bot.send_message(chat_id=chat_id, text=f"📤 正在发送文件: {safe_filename}...")
+                            with open(file_path, 'rb') as f:
+                                await context.bot.send_document(chat_id=chat_id, document=f, filename=safe_filename)
+                            execution_log.append(f"[System] Sent file {safe_filename} to user.")
+                        else:
+                            success = False
+                            error_msg = f"File {safe_filename} not found in workspace."
+                            execution_log.append(f"[System] Tried to send {safe_filename} but it doesn't exist.")
+                            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 找不到文件: {safe_filename}")
+                    except Exception as e:
+                        logger.error(f"Send File Failed: {e}")
+                        success = False
+                        error_msg = str(e)
+                        execution_log.append(f"[System] Failed to send file {filename}: {e}")
+                else:
+                    success = False
+                    error_msg = "No filename provided for send_file."
+
+            # --- File Read ---
+            elif task_type == "file_read":
+                filename = task_payload.get("filename")
+                if filename:
+                    try:
+                        workspace_dir = "workspace"
+                        safe_filename = os.path.basename(filename)
+                        file_path = os.path.join(workspace_dir, safe_filename)
+                        
+                        if os.path.exists(file_path):
+                            await context.bot.send_message(chat_id=chat_id, text=f"📖 正在读取文件: {safe_filename}...")
+                            
+                            def read_file():
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    return f.read()
+                            
+                            content = await asyncio.to_thread(read_file)
+                            
+                            # Truncate if too long to avoid token explosion, though Gemini can handle a lot (upgraded to 50000 for full articles)
+                            preview = content[:50000] + ("\n...(truncated)" if len(content) > 50000 else "")
+                            
+                            execution_log.append(f"[System] Read file {safe_filename}. Content:\n{preview}")
+                            logger.info(f"Read {len(content)} chars from {safe_filename}")
+                        else:
+                            success = False
+                            error_msg = f"File {safe_filename} not found in workspace."
+                            execution_log.append(f"[System] Tried to read {safe_filename} but it doesn't exist.")
+                            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 找不到文件: {safe_filename}")
+                    except Exception as e:
+                        logger.error(f"Read File Failed: {e}")
+                        success = False
+                        error_msg = str(e)
+                        execution_log.append(f"[System] Failed to read file {filename}: {e}")
+                else:
+                    success = False
+                    error_msg = "No filename provided for file_read."
+
+            # --- Run Command ---
+            elif task_type == "run_command":
+                command = task_payload.get("command")
+                timeout_seconds = int(task_payload.get("timeout", 30))
+                
+                if command:
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚡ 正在执行命令:\n`{command}`", parse_mode='MarkdownV2')
+                    try:
+                        # Ensure we execute in the workspace directory for safety/context, or root if preferred. 
+                        # We'll execute in the current working directory but log it.
+                        logger.info(f"Executing command: {command} with timeout {timeout_seconds}s")
+                        
+                        process = await asyncio.create_subprocess_shell(
+                            command,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        
+                        try:
+                            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+                            
+                            def safe_decode(b_data):
+                                try:
+                                    return b_data.decode('utf-8').strip()
+                                except UnicodeDecodeError:
+                                    return b_data.decode('gbk', errors='replace').strip()
+                                    
+                            stdout_str = safe_decode(stdout)
+                            stderr_str = safe_decode(stderr)
+                            exit_code = process.returncode
+                            
+                            output_msg = f"**执行完成 (Exit: {exit_code})**\n"
+                            if stdout_str:
+                                output_msg += f"**STDOUT**:\n```text\n{stdout_str[:2000]}\n```\n"
+                            if stderr_str:
+                                output_msg += f"**STDERR**:\n```text\n{stderr_str[:1000]}\n```\n"
+                                
+                            if len(stdout_str) > 2000 or len(stderr_str) > 1000:
+                                output_msg += "\n*(Output truncated)*"
+                                
+                            if not stdout_str and not stderr_str:
+                                output_msg += "*(No output)*"
+                                
+                            execution_log.append(f"[System] Command executed: `{command}`. Exit Code: {exit_code}\nStdout: {stdout_str[:1000]}\nStderr: {stderr_str[:500]}")
+                            await context.bot.send_message(chat_id=chat_id, text=output_msg, parse_mode='Markdown')
+                            
+                        except asyncio.TimeoutError:
+                            process.kill()
+                            await process.communicate() # collect garbage
+                            error_msg = f"Command timed out after {timeout_seconds} seconds."
+                            logger.error(error_msg)
+                            execution_log.append(f"[System] Command `{command}` timed out.")
+                            await context.bot.send_message(chat_id=chat_id, text=f"❌ 命令执行超时 ({timeout_seconds}s): `{command}`", parse_mode='Markdown')
+                            success = False
+                            
+                    except Exception as e:
+                        logger.error(f"Command Execution Failed: {e}")
+                        success = False
+                        error_msg = str(e)
+                        execution_log.append(f"[System] Failed to execute `{command}`: {e}")
+                else:
+                    success = False
+                    error_msg = "No command string provided for run_command."
 
             # --- WordPress Post ---
             elif task_type == "wordpress_post":
@@ -1154,19 +1578,23 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         user_verbatim_content = instructions
                         logger.info(f"Using user_provided_content for verbatim blog ({len(user_verbatim_content)} chars)")
                     
-                    elif source_content == "prior_tasks":
-                        # Collect translated content and search results from execution_log
+                    # ALWAYS forcefully check execution_log for prior translation or search tasks first
+                    # This prevents hallucinations if Qwen forgot to set source_content="prior_tasks"
+                    for entry in execution_log:
+                        if entry.startswith("[Translation Result]"):
+                            prior_content += entry.replace("[Translation Result]", "").strip() + "\n\n"
+                            
+                    if not prior_content and source_content == "prior_tasks":
                         for entry in execution_log:
-                            if entry.startswith("[Translation Result]"):
-                                prior_content += entry.replace("[Translation Result]", "").strip() + "\n\n"
-                            elif "Search Results" in entry:
+                            if "Search Results" in entry:
                                 prior_content += entry + "\n\n"
+                    
+                    if prior_content:
+                        logger.info(f"Using prior task content for WordPress post ({len(prior_content)} chars)")
+                        image_prompt = f"Professional blog illustration related to: {prior_content[:200]}"
+                    elif source_content == "prior_tasks":
+                        logger.warning("source_content='prior_tasks' but no prior content found in execution_log. Falling back to generation.")
                         
-                        if prior_content:
-                            logger.info(f"Using prior task content for WordPress post ({len(prior_content)} chars)")
-                            image_prompt = f"Professional blog illustration related to: {prior_content[:200]}"
-                        else:
-                            logger.warning("source_content='prior_tasks' but no prior content found in execution_log. Falling back to generation.")
                     
                     elif source_content == "user_instructions":
                         # User provided their own writing instructions (e.g. "写一篇关于AI摄影的博客")
@@ -1343,12 +1771,9 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                             # We continue to the next image instead of failing the whole task
 
                     if not image_urls:
-                        if effective_use_uploaded:
-                            # When using uploaded media, allow 0 images (content-only blog is OK)
-                            logger.warning("No images available but using uploaded media flow. Proceeding with text-only blog.")
-                            await context.bot.send_message(chat_id=chat_id, text="⚠️ 素材上传到WordPress失败，将发布纯文本博客。")
-                        else:
-                            raise Exception("Failed to generate or upload any images for the blog post.")
+                        # Graceful fallback: Proceed without images if the uploads/generations failed.
+                        logger.warning("No images available or generation failed. Proceeding with a text-only blog post.")
+                        await context.bot.send_message(chat_id=chat_id, text="⚠️ 图片处理失败或超时，将发布纯文本博客。")
 
                     # 2. Generate Content — USE PRIOR CONTENT if available, else generate from scratch
                     urls_list_str = "\n".join([f"- IMAGE_URL_{i+1}: {url}" for i, url in enumerate(image_urls)])
@@ -1727,13 +2152,20 @@ if __name__ == '__main__':
         application = builder.build()
         
         application.add_handler(CommandHandler('start', start))
-        
+        # Global Error Handler
+        async def global_error_handler(update, context):
+            # Log the error and avoid crash
+            logger.error(f"Exception while handling an update: {context.error}")
+
+        application.add_error_handler(global_error_handler)
+
         # Explicit Handlers
         application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
         
         print("Agent is running with Explicit Vision Handlers! (Ctrl+C to stop)")
-        application.run_polling()
+        application.run_polling(drop_pending_updates=True)
     except KeyboardInterrupt:
         print("\nBot stopped by user. Goodbye!")
     except Exception as e:
