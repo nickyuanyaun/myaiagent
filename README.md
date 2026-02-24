@@ -20,6 +20,22 @@ Copy and paste this line into an elevated **PowerShell** window:
 iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/nickyuanyaun/myaiagent/main/install.ps1'))
 ```
 
+## Updating
+
+If the developer releases new features, you can update your agent with a single command:
+
+### 🍎 macOS & 🐧 Linux
+Run inside the `myaiagent` directory:
+```bash
+./update.sh
+```
+
+### 🖥️ Windows
+Run inside the `myaiagent` directory:
+```powershell
+.\update.ps1
+```
+
 ## Features
 - Deeply integrated conversational engine using Google Gemini.
 - Cross-user Telegram task routing and persistent reminders/cron jobs.
