@@ -8,8 +8,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QwenBrain:
-    def __init__(self, genai_client, model_name="gemini-2.0-flash"):
+    def __init__(self, genai_client, plugin_manager=None, model_name="gemini-2.0-flash"):
         self.genai_client = genai_client
+        self.plugin_manager = plugin_manager
         self.model_name = model_name
 
     def analyze_message(self, user_text: str, current_time: str = None):
@@ -19,9 +20,14 @@ class QwenBrain:
         if not current_time:
              current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        plugin_info = ""
+        if self.plugin_manager:
+            plugin_info = f"\n\n{self.plugin_manager.get_plugin_descriptions()}"
+            
         system_prompt = f"""
         You are the 'Subconscious Mind' of an AI Agent.
         Current Reference Time: {current_time}
+        {plugin_info}
         
         Your Task: Analyze the User's input and break it down into a list of executable tasks.
          Output JSON Format:
@@ -92,6 +98,17 @@ class QwenBrain:
                 {{
                     "type": "file_read",
                     "filename": "notes.txt"
+                }},
+                {{
+                    "type": "create_plugin",
+                    "plugin_name": "get_crypto_price",
+                    "description": "Fetches current cryptocurrency prices",
+                    "code": "..."
+                }},
+                {{
+                    "type": "use_plugin",
+                    "plugin_name": "get_crypto_price",
+                    "args": {{"symbol": "BTC"}}
                 }}
             ]
         }}
@@ -183,6 +200,25 @@ class QwenBrain:
            - IMPORTANT FOR WINDOWS: Always use backslashes (`\\`) for folder paths, NOT forward slashes. ALWAYS wrap paths containing spaces or Chinese in double quotes (e.g. `"Z:\\我的文件夹\\file.txt"`). NEVER omit the backslash after a drive letter (use `"Z:\\"` NOT `"Z:"`).
            - 'command': The exact command string to execute.
            - 'timeout': (Optional) Maximum time in seconds to wait for the command to finish. Default is 30.
+
+        15. **create_plugin**:
+           - Use when the user explicitly asks you to WRITE A SCRIPT to ADD A NEW CAPABILITY/FEATURE to yourself.
+           - 'plugin_name': Snake_case name of the plugin (e.g., "get_crypto_price").
+           - 'description': Short description of what it does.
+           - 'code': The raw Python code for the plugin.
+             - MUST include a global dictionary `PLUGIN_METADATA = {{"description": "...", "args": {{"arg_name": "type"}}}}`.
+             - MUST include a function `def execute(**kwargs):` that returns a string result.
+             - E.g:
+               ```python
+               import requests
+               PLUGIN_METADATA = {{"description": "Fetches crypto price", "args": {{"symbol": "str"}}}}
+               def execute(symbol="BTC"): return "Price is 100k!"
+               ```
+               
+        16. **use_plugin**:
+           - Use when the user asks you to perform an action that matches one of your `AVAILABLE CUSTOM PLUGINS` listed above.
+           - 'plugin_name': The exact name of the loaded plugin.
+           - 'args': A JSON object containing the required arguments.
         
         **CRITICAL INSTRUCTION**: 
         - Return ONLY valid JSON.

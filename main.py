@@ -30,13 +30,17 @@ from metube_client import MeTubeClient
 from wordpress_client import WordPressClient
 from file_watcher import FileWatcher
 from blog_media_store import BlogMediaStore
+from plugin_manager import PluginManager
 
-# 1. Load Configuration
+# 1. Configuration & Constants
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_IDS = [int(id_str.strip()) for id_str in os.getenv("ALLOWED_USER_IDS", "").split(",") if id_str.strip()]
+ALLOWED_USER_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
+SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-3-flash-preview") 
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
 MAX_CONTEXT_MESSAGES = 20
 
 # Initialize Google GenAI Client
@@ -47,6 +51,7 @@ memory_store = None
 qwen_brain = None
 task_store = None
 metube_client = None
+plugin_manager = None
 file_watcher = None
 blog_media_store = None
 
@@ -214,6 +219,7 @@ task_store = None
 metube_client = None
 file_watcher = None
 blog_media_store = None
+plugin_manager = None
 
 # 4. Helper Functions
 def get_system_prompt(memories=""):
@@ -1629,6 +1635,56 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                     success = False
                     error_msg = "No command string provided for run_command."
 
+            # --- Dynamic Plugins ---
+            elif task_type == "create_plugin":
+                plugin_name = task_payload.get("plugin_name", "")
+                code = task_payload.get("code", "")
+                
+                if plugin_name and code and plugin_manager:
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚙️ 正在为您编写并挂载新插件: `{plugin_name}.py`...")
+                    saved = await asyncio.to_thread(plugin_manager.write_plugin, plugin_name, code)
+                    if saved:
+                        await context.bot.send_message(chat_id=chat_id, text=f"✅ 插件 `{plugin_name}` 已成功加载，我可以立即使用它了！")
+                        execution_log.append(f"[System] Plugin {plugin_name} created and successfully hot-reloaded.")
+                    else:
+                        success = False
+                        error_msg = "Failed to write plugin code to disk."
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ 插件 `{plugin_name}` 保存失败。")
+                else:
+                    success = False
+                    error_msg = "Missing plugin name, code, or PluginManager not initialized."
+
+            elif task_type == "use_plugin":
+                plugin_name = task_payload.get("plugin_name", "")
+                args = task_payload.get("args", {})
+                
+                if plugin_name and plugin_manager:
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚡ 正在执行插件 `{plugin_name}`...")
+                    logger.info(f"Executing plugin {plugin_name} with args {args}")
+                    try:
+                        result = await asyncio.to_thread(plugin_manager.execute_plugin, plugin_name, **args)
+                        
+                        # Loop the result back into the execution log
+                        execution_log.append(f"[Plugin Result ({plugin_name})]\n{result}")
+                        logger.info(f"Plugin result: {str(result)[:500]}")
+                        
+                        # Send raw result briefly
+                        result_str = str(result)
+                        if len(result_str) > 1000:
+                            await context.bot.send_message(chat_id=chat_id, text=f"🧩 插件执行完毕，输出较长已折叠，正在总结...")
+                        else:
+                            await context.bot.send_message(chat_id=chat_id, text=f"🧩 插件返回结果:\n`{result_str}`", parse_mode='Markdown')
+                            
+                    except Exception as e:
+                        success = False
+                        error_msg = str(e)
+                        logger.error(f"Plugin execution failed: {e}")
+                        execution_log.append(f"[System] Plugin {plugin_name} execution failed: {e}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ 插件执行失败: {e}")
+                else:
+                    success = False
+                    error_msg = "Missing plugin name or PluginManager not initialized."
+
             # --- WordPress Post ---
             elif task_type == "wordpress_post":
                 try:
@@ -2123,16 +2179,24 @@ if __name__ == '__main__':
 
     # Initialize Brains
     try:
+        print("Initializing Plugin Manager...")
+        plugin_manager = PluginManager()
+        
         print("Initializing Memory Store...")
         memory_store = MemoryStore()
+        
         print("Initializing Qwen Brain...")
-        qwen_brain = QwenBrain(genai_client)  # Uses Gemini API
+        qwen_brain = QwenBrain(genai_client, plugin_manager=plugin_manager)  # Uses Gemini API
+        
         print("Initializing Task Store...")
         task_store = TaskStore()
+        
         print("Initializing Blog Media Store...")
         blog_media_store = BlogMediaStore()
+        
         print("Initializing MeTube Client...")
         metube_client = MeTubeClient()
+        
         print("Initializing File Watcher...")
         # SMB Path provided by user
         smb_path = r"\\192.168.1.28\LaCie\Projects\metube\downloads"
