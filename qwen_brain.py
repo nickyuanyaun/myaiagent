@@ -198,7 +198,7 @@ class QwenBrain:
            
         14. **run_command**:
            - Use when the user specifically asks you to execute a terminal, shell, or PowerShell command.
-           - IMPORTANT FOR WINDOWS: Always use backslashes (`\\`) for folder paths, NOT forward slashes. ALWAYS wrap paths containing spaces or Chinese in double quotes (e.g. `"Z:\\我的文件夹\\file.txt"`). NEVER omit the backslash after a drive letter (use `"Z:\\"` NOT `"Z:"`).
+           - IMPORTANT: Adapt path separators to the OS implicitly. Windows uses `\\` and macOS/Linux uses `/`.
            - 'command': The exact command string to execute.
            - 'timeout': (Optional) Maximum time in seconds to wait for the command to finish. Default is 30.
 
