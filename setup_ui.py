@@ -5,6 +5,11 @@ import os
 import urllib.parse
 import json
 import sys
+# Added for model fetching
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # --- Configuration & Styling ---
 PORT = 8080
@@ -103,6 +108,30 @@ HTML_TEMPLATE = """
 
         .footer { text-align: center; margin-top: 2rem; font-size: 0.8rem; color: var(--text-dim); }
         .footer a { color: var(--primary); text-decoration: none; }
+        
+        .row { display: flex; gap: 10px; align-items: flex-end; }
+        .row .form-group { margin-bottom: 0; flex: 1; }
+        .row button { width: auto; margin-top: 0; padding: 12px 20px; font-size: 0.9rem; white-space: nowrap; }
+        
+        #model-select {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            color: white;
+            font-family: inherit;
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+            appearance: none;
+            cursor: pointer;
+        }
+        #model-select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
+        }
+        .help-text { font-size: 0.8rem; color: var(--text-dim); margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -118,7 +147,21 @@ HTML_TEMPLATE = """
             
             <div class="form-group">
                 <label>Google Gemini API Key</label>
-                <input type="password" name="GOOGLE_KEY" placeholder="您的 Gemini Pro API 密钥" required>
+                <div class="row">
+                    <input type="password" id="api_key" name="GOOGLE_KEY" placeholder="您的 Gemini Pro API 密钥" required>
+                    <button type="button" onclick="fetchModels()">获取模型</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>AI 原生模型选择 (需先填写 API Key)</label>
+                <input type="text" id="model_input" name="GEMINI_MODEL" list="model_list" placeholder="选择或填写 (默认: gemini-2.5-flash)" value="gemini-2.5-flash">
+                <datalist id="model_list">
+                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                    <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                    <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
+                </datalist>
+                <div class="help-text" id="model_status">此致模型将用于网页搜索、文本规划和翻译。</div>
             </div>
             
             <div class="form-group">
@@ -133,6 +176,45 @@ HTML_TEMPLATE = """
             Powered by Antigravity Agent • <a href="https://github.com/nickyuanyaun/myaiagent" target="_blank">View on GitHub</a>
         </div>
     </div>
+
+    <script>
+        async function fetchModels() {
+            const apiKey = document.getElementById('api_key').value;
+            const statusLabel = document.getElementById('model_status');
+            const dataList = document.getElementById('model_list');
+            
+            if (!apiKey) {
+                statusLabel.innerText = "❌ 请先输入 Google API Key";
+                statusLabel.style.color = "#ef4444";
+                return;
+            }
+
+            statusLabel.innerText = "⏳ 正在拉取可用模型列表...";
+            statusLabel.style.color = "var(--text-dim)";
+            
+            try {
+                const response = await fetch(`/api/models?key=${apiKey}`);
+                if (!response.ok) throw new Error("API 请求失败");
+                const data = await response.json();
+                
+                if (data.models && data.models.length > 0) {
+                    dataList.innerHTML = ''; // Clear default options
+                    data.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model;
+                        dataList.appendChild(option);
+                    });
+                    statusLabel.innerText = `✅ 成功拉取 ${data.models.length} 个模型！请在上方下拉框选择。`;
+                    statusLabel.style.color = "#22c55e";
+                } else if (data.error) {
+                    throw new Error(data.error);
+                }
+            } catch (err) {
+                statusLabel.innerText = `❌ 拉取失败: ${err.message}`;
+                statusLabel.style.color = "#ef4444";
+            }
+        }
+    </script>
 </body>
 </html>
 """
@@ -166,6 +248,43 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+        elif self.path.startswith('/api/models'):
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            key = params.get('key', [''])[0]
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            
+            response_data = {"models": []}
+            if genai and key:
+                try:
+                    client = genai.Client(api_key=key)
+                    # Get models that support generateContent
+                    models = client.models.list()
+                    model_names = [m.name for m in models if "generateContent" in m.supported_actions]
+                    
+                    # Sort logic to prioritize preferred models at the top
+                    preferred = ["gemini-3-pro-preview", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+                    sorted_models = []
+                    for p in preferred:
+                        matching = [name for name in model_names if p in name or name.endswith(p)]
+                        if matching:
+                            sorted_models.append(matching[0])
+                    
+                    # Add any remaining models not in preferred list
+                    for m in model_names:
+                        if m not in sorted_models and "gemini" in m:
+                            sorted_models.append(m)
+                            
+                    response_data["models"] = sorted_models
+                except Exception as e:
+                    response_data["error"] = str(e)
+            elif not genai:
+                response_data["error"] = "google-genai sdk not installed."
+            
+            self.wfile.write(json.dumps(response_data).encode('utf-8'))
         else:
             self.send_error(404)
 
@@ -179,11 +298,13 @@ class SetupHandler(http.server.SimpleHTTPRequestHandler):
             tg_token = params.get('TG_TOKEN', [''])[0]
             google_key = params.get('GOOGLE_KEY', [''])[0]
             user_id = params.get('USER_ID', [''])[0]
+            gemini_model = params.get('GEMINI_MODEL', ['gemini-2.5-flash'])[0]
 
             # Write .env file
             env_content = f"TELEGRAM_BOT_TOKEN={tg_token}\n"
             env_content += f"ALLOWED_USER_IDS={user_id}\n"
             env_content += f"GOOGLE_API_KEY={google_key}\n"
+            env_content += f"GEMINI_MODEL_NAME={gemini_model}\n"
             env_content += "METUBE_URL=http://localhost:8081\n"
             env_content += "WP_URL=https://your-wordpress-site.com\n"
             env_content += "WP_USER=admin\n"

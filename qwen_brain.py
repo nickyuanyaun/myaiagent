@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QwenBrain:
-    def __init__(self, genai_client, plugin_manager=None, model_name="gemini-2.0-flash"):
+    def __init__(self, genai_client, plugin_manager=None, model_name="gemini-2.5-flash"):
         self.genai_client = genai_client
         self.plugin_manager = plugin_manager
         self.model_name = model_name
@@ -282,7 +282,7 @@ class QwenBrain:
         if not retrieved_memories:
             return ""
         
-        return "\n".join([f"- {m}" for m in retrieved_memories])
+        return "\n".join([f"- {m}" for retrieved_memories])
 
     def filter_memories(self, user_text: str, candidate_memories: list) -> list:
         """

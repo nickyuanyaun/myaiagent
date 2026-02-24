@@ -34,13 +34,12 @@ from plugin_manager import PluginManager
 
 # 1. Configuration & Constants
 load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
-SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ALLOWED_USER_IDS_STR = os.environ.get("ALLOWED_USER_IDS", "")
+ALLOWED_USER_IDS = [int(uid.strip()) for uid in ALLOWED_USER_IDS_STR.split(",") if uid.strip().isdigit()]
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+METUBE_URL = os.environ.get("METUBE_URL", "http://localhost:8081")
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 MAX_CONTEXT_MESSAGES = 20
 
 # Initialize Google GenAI Client
@@ -773,17 +772,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. Transcribe using Google GenAI (Native Audio parsing)
         await context.bot.send_message(chat_id=chat_id, text="🎙️ 正在识别语音...")
         
-        # We use the standard model (gemini-2.5-flash) which supports multi-modal audio inputs
-        chat = genai_client.chats.create(model=GEMINI_MODEL_NAME)
+        # We use the standard configured model which supports multi-modal audio inputs
         audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
         transcription_prompt = "Please accurately transcribe the following audio message into text. Only return the transcribed text, nothing else. If it's Chinese, transcribe in Chinese. If it's English, in English."
         
-        # Sync to async wrapper
-        def transcribe():
-            return chat.send_message([transcription_prompt, audio_part])
-            
-        transcribe_response = await asyncio.to_thread(transcribe)
-        user_input = transcribe_response.text.strip()
+        response = await asyncio.to_thread(
+            genai_client.models.generate_content,
+            model=GEMINI_MODEL_NAME,
+            contents=[audio_part, transcription_prompt],
+        )
+        user_input = response.text.strip()
         
         if not user_input:
             await context.bot.send_message(chat_id=chat_id, text="⚠️ 抱歉，我没有听清您说什么。")
@@ -1242,7 +1240,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                         logger.info(f"Injecting {len(vision_parts)} images into blog_write_draft context")
 
                     draft_resp = genai_client.models.generate_content(
-                        model="gemini-2.0-flash", # Use a multimodal model
+                        model=GEMINI_MODEL_NAME, # Use the selected multimodal model
                         contents=contents_list,
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
@@ -1494,7 +1492,7 @@ async def process_agent_logic(context, chat_id, user_input, image_b64, update, a
                                 history_context = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in context.user_data['history'][-10:]])
                                 
                             write_prompt = (
-                                f"Please write the complete content for a file named {filename}.\n\n"
+                                f"Please write the complete content for a file named {file_path}.\n\n"
                                 f"Instructions: {instructions}\n\n"
                                 f"--- Recent Conversation Context ---\n{history_context}\n"
                                 f"User's newest message: {user_input}\n"

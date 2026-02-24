@@ -240,11 +240,13 @@ RAW CONTENT TO FORMAT:
 
         try:
             from google.genai import types
+            import os
             resp = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
                 contents=[formatting_prompt],
                 config=types.GenerateContentConfig(
                     temperature=0.3,  # Low temperature for consistent formatting
+                    response_mime_type="application/json"
                 )
             )
             if resp.text:
